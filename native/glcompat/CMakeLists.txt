@@ -10,6 +10,10 @@ project(glcompat C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(SDL_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/SDL-release-3.4.14/include"
+    CACHE PATH "SDL3 include directory")
+
 add_library(GLCompat SHARED
     src/glcompat.c
     src/error.c
@@ -21,8 +25,7 @@ add_library(GLCompat SHARED
     src/wrap_tex.c)
 
 target_compile_definitions(GLCompat PRIVATE _GNU_SOURCE)
-target_include_directories(GLCompat PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/SDL-release-3.4.14/include")
+target_include_directories(GLCompat PRIVATE "${SDL_INCLUDE_DIR}")
 target_compile_options(GLCompat PRIVATE
     -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type
     -fvisibility=hidden)

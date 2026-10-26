@@ -52,11 +52,6 @@ else
     exit 1
 fi
 APKOUT="$ROOT/build/output/apk"
-APKS=("$APKOUT/factorio-$GAME_VERSION-panfrost-experimental.apk"
-      "$APKOUT/factorio-$GAME_VERSION-glcompat-unverisal.apk")
-for apk in "${APKS[@]}"; do
-    [[ ! -e $apk && ! -L $apk ]] || { echo "Refusing to overwrite existing APK: $apk" >&2; exit 1; }
-done
 
 SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
 NDK=${ANDROID_NDK_HOME:-$SDK/ndk/android-ndk-r28c}
@@ -71,11 +66,13 @@ for required in tools/port.py tools/elf.py native/fshim/CMakeLists.txt \
 done
 [[ -d "$ROOT/android-wrapper/java" ]] || { echo "Missing Android Java sources: android-wrapper/java" >&2; exit 1; }
 
-for tool in bash python3 tar curl git cmake ninja meson pkg-config flex bison \
-    clang llvm-config glslangValidator llvm-spirv patch aapt2 d8 zipalign apksigner \
-    javac jar keytool zip realpath grep sort tail find awk ln cp; do
+for tool in bash python3 tar curl git cmake ninja meson pkg-config flex bison sha256sum \
+    clang llvm-config glslangValidator patch aapt2 d8 zipalign apksigner \
+    javac jar keytool zip realpath grep sort tail find awk ln cp cat cut dirname basename; do
     command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
+NINJA=$(command -v ninja)
+export PATH="$(dirname -- "$NINJA"):$PATH"
 python3 - <<'PY'
 required_modules = ("capstone", "mako", "yaml", "packaging")
 missing = []
@@ -91,23 +88,59 @@ PY
 [[ -f "$ANDROID_JAR" ]] || { echo "Missing Android platform jar: $ANDROID_JAR" >&2; exit 1; }
 [[ -x "$BT/aapt2" && -x "$BT/d8" && -x "$BT/zipalign" && -x "$BT/apksigner" ]] || { echo "Incomplete Android build-tools directory: $BT" >&2; exit 1; }
 
-mkdir -p build/intermediate build/dependencies build/output/apk
-RUN=$(mktemp -d "$ROOT/build/intermediate/run.XXXXXXXX")
-DEPS="$ROOT/build/dependencies"
-SRC="$RUN/src"
-mkdir -p "$SRC" "$RUN/build" "$RUN/stage"
-echo "== initial-draft build run: $RUN =="
+BUILDROOT="$ROOT/build"
+INTERMEDIATE="$BUILDROOT/intermediate"
+DEPS="$BUILDROOT/dependencies"
+SDL_VERSION=3.4.14
+SDL_PATCH_KEY=$(cat patches/sdl/sdl-dynapi-android.patch patches/sdl/sdl-glproc-android.patch | sha256sum | cut -c1-12)
+SDL_BUILD="$INTERMEDIATE/sdl-$SDL_VERSION-$SDL_PATCH_KEY"
+SDL_SOURCE="$DEPS/sdl-$SDL_VERSION/source"
+SDL_PATCHED="$DEPS/sdl-$SDL_VERSION/patched-$SDL_PATCH_KEY"
+FSHIM_BUILD="$INTERMEDIATE/fshim/$GAME_VERSION"
+GLCOMPAT_BUILD="$INTERMEDIATE/glcompat-$SDL_PATCH_KEY"
+FACTORIO_BUILD="$INTERMEDIATE/factorio/$GAME_VERSION"
+PANFROST_COMMIT=8af067e0a48a977334838c97f4a992bbfa100f69
+PANFROST_URL=https://github.com/JimVulkan/mali-panfrost.git
+PANFROST_SOURCE="$DEPS/mali-panfrost-$PANFROST_COMMIT"
+PANFROST_BUILD="$INTERMEDIATE/panfrost-android-$PANFROST_COMMIT"
 
-# Validate tar member names before extraction; extract just the executable from
-# the appropriate archive's known top-level layout. Never extract untrusted paths.
+mkdir -p "$INTERMEDIATE" "$DEPS" "$BUILDROOT/output/apk"
+RUN=$(mktemp -d "$INTERMEDIATE/run.XXXXXXXX")
+mkdir -p "$RUN/factorio/bin/arm64" "$RUN/package"
+LOG_DIR="$INTERMEDIATE/logs/$GAME_VERSION"
+mkdir -p "$LOG_DIR"
+echo "== Factorio Android build: $GAME_VERSION =="
+echo "== run directory: $RUN =="
+echo "== persistent dependencies: $DEPS =="
+echo "== persistent native builds: $INTERMEDIATE =="
+step() { printf '\n==> %s\n' "$*"; }
+run_logged() {
+    local label=$1 log=$2 status warnings
+    shift 2
+    step "$label"
+    if "$@" >"$log" 2>&1; then
+        warnings=$(grep -ci 'warning:' "$log" || true)
+        if [[ $warnings -gt 0 ]]; then
+            printf '    completed with %s warning(s); details: %s\n' "$warnings" "$log"
+        else
+            printf '    completed; details: %s\n' "$log"
+        fi
+    else
+        status=$?
+        printf '    FAILED (exit %s); full output follows from %s\n' "$status" "$log" >&2
+        cat "$log" >&2
+        return "$status"
+    fi
+}
+
+# Extract only the known executable member. Python verifies it is exactly one
+# regular file and streams it to a fixed destination (no archive paths are used
+# to construct output paths).
+step "Extracting only the Factorio executable from $BASE"
 case "$BASE" in
     factorio_linux-arm64_*) EXE_MEMBER="factorio/bin/arm64/factorio" ;;
     factorio-space-age_linux-arm64_*) EXE_MEMBER="factorio/bin/arm64/factorio" ;;
 esac
-if ! tar -tJf "$ARCHIVE" | grep -Fxq "$EXE_MEMBER"; then
-    echo "Expected executable member '$EXE_MEMBER' not found in archive; inspect archive layout." >&2
-    exit 1
-fi
 GAME_EXE="$RUN/factorio/bin/arm64/factorio"
 python3 - "$ARCHIVE" "$EXE_MEMBER" "$GAME_EXE" <<'PY'
 import pathlib
@@ -129,100 +162,137 @@ with tarfile.open(archive, mode="r:xz") as tf:
         shutil.copyfileobj(source, output)
     destination.chmod(0o755)
 PY
+step "Translating Factorio $GAME_VERSION into the Android-loadable game library"
+mkdir -p "$FACTORIO_BUILD"
 python3 tools/port.py --source "$GAME_EXE" \
-    --out "$RUN/build/libfactorio_game.so" --report "$RUN/build/port-report.json" \
-    --constants "$RUN/build/game_constants.h" --game-version "$GAME_VERSION"
+    --out "$FACTORIO_BUILD/libfactorio_game.so" --report "$FACTORIO_BUILD/port-report.json" \
+    --constants "$FACTORIO_BUILD/game_constants.h" --game-version "$GAME_VERSION"
 
 # Use source releases pinned by version/tag or immutable commit. The SDL GitHub
 # release tag is 3.4.14; Panfrost is pinned to the tested JimVulkan commit.
-SDL_VERSION=3.4.14
 SDL_URL="https://github.com/libsdl-org/SDL/archive/refs/tags/release-$SDL_VERSION.tar.gz"
 SDL_ARCHIVE="$DEPS/SDL3-$SDL_VERSION.tar.gz"
 if [[ ! -f $SDL_ARCHIVE ]]; then
+    step "Downloading SDL $SDL_VERSION source"
     curl --fail --location --retry 3 "$SDL_URL" --output "$SDL_ARCHIVE"
+else
+    step "Using cached SDL $SDL_VERSION source archive"
 fi
-SDL_UNPACK="$RUN/dependencies/sdl-unpack"
-mkdir -p "$SDL_UNPACK"
-tar -xzf "$SDL_ARCHIVE" -C "$SDL_UNPACK" --no-same-owner --no-same-permissions
-SDL_SOURCE=$(find "$SDL_UNPACK" -mindepth 1 -maxdepth 1 -type d -print -quit)
-[[ -n $SDL_SOURCE && -f $SDL_SOURCE/CMakeLists.txt ]] || { echo "SDL archive layout unexpected" >&2; exit 1; }
-cp -a "$SDL_SOURCE" "$SRC/SDL"
-patch --batch --fuzz=0 -d "$SRC/SDL" -p1 --forward < patches/sdl/sdl-dynapi-android.patch
-patch --batch --fuzz=0 -d "$SRC/SDL" -p1 --forward < patches/sdl/sdl-glproc-android.patch
+if [[ ! -f "$SDL_SOURCE/CMakeLists.txt" ]]; then
+    if [[ -n $(find "$SDL_SOURCE" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true) ]]; then
+        echo "Incomplete cached SDL source tree: $SDL_SOURCE (preserving it; inspect manually)" >&2
+        exit 1
+    fi
+    step "Extracting SDL source into persistent dependency directory $SDL_SOURCE"
+    mkdir -p "$SDL_SOURCE"
+    tar -xzf "$SDL_ARCHIVE" -C "$SDL_SOURCE" --strip-components=1 --no-same-owner --no-same-permissions
+fi
+[[ -f "$SDL_SOURCE/CMakeLists.txt" ]] || { echo "SDL archive layout unexpected" >&2; exit 1; }
+step "Applying or verifying SDL Android patches: dynapi, then GL procedure lookup"
+if [[ ! -f "$SDL_PATCHED/CMakeLists.txt" ]]; then
+    [[ ! -e $SDL_PATCHED ]] || { echo "Incomplete patched SDL directory: $SDL_PATCHED" >&2; exit 1; }
+    step "Creating persistent patched SDL tree $SDL_PATCHED"
+    cp -a "$SDL_SOURCE" "$SDL_PATCHED"
+    patch --batch --fuzz=0 -d "$SDL_PATCHED" -p1 --forward < patches/sdl/sdl-dynapi-android.patch
+    patch --batch --fuzz=0 -d "$SDL_PATCHED" -p1 --forward < patches/sdl/sdl-glproc-android.patch
+else
+    step "Reusing persistent patched SDL tree $SDL_PATCHED"
+    patch --dry-run --silent --batch --fuzz=0 --reverse -d "$SDL_PATCHED" -p1 < patches/sdl/sdl-dynapi-android.patch || {
+        echo "Cached SDL dynapi patch state is inconsistent: $SDL_PATCHED" >&2; exit 1;
+    }
+    patch --dry-run --silent --batch --fuzz=0 --reverse -d "$SDL_PATCHED" -p1 < patches/sdl/sdl-glproc-android.patch || {
+        echo "Cached SDL GL lookup patch state is inconsistent: $SDL_PATCHED" >&2; exit 1;
+    }
+fi
 # Intentionally do not apply the abandoned touch-hold experiment.
 
-PANFROST_COMMIT=8af067e0a48a977334838c97f4a992bbfa100f69
-PANFROST_URL=https://github.com/JimVulkan/mali-panfrost.git
-PANFROST_SOURCE="$RUN/dependencies/mali-panfrost"
-mkdir -p "$RUN/dependencies"
-git clone --filter=blob:none --no-checkout "$PANFROST_URL" "$PANFROST_SOURCE"
-git -C "$PANFROST_SOURCE" fetch --depth=1 origin "$PANFROST_COMMIT"
-git -C "$PANFROST_SOURCE" checkout --detach "$PANFROST_COMMIT"
+if [[ ! -d "$PANFROST_SOURCE/.git" ]]; then
+    step "Fetching Panfrost source at pinned commit $PANFROST_COMMIT into persistent dependencies"
+    git clone --filter=blob:none --no-checkout "$PANFROST_URL" "$PANFROST_SOURCE"
+    git -C "$PANFROST_SOURCE" fetch --depth=1 origin "$PANFROST_COMMIT"
+    git -C "$PANFROST_SOURCE" checkout --detach "$PANFROST_COMMIT"
+else
+    step "Reusing persistent Panfrost source at $PANFROST_SOURCE"
+    CURRENT_PANFROST=$(git -C "$PANFROST_SOURCE" rev-parse HEAD)
+    [[ $CURRENT_PANFROST == "$PANFROST_COMMIT" ]] || {
+        echo "Panfrost cache is at $CURRENT_PANFROST, expected $PANFROST_COMMIT; preserving it." >&2; exit 1;
+    }
+fi
 
-# Preserve relative source-tree expectations in native/glcompat/CMakeLists.txt
-# without touching the checkout's source or vendor directories.
-mkdir -p "$SRC/native" "$SRC/vendor"
-cp -a native/glcompat "$SRC/native/glcompat"
-cp -a "$SRC/SDL" "$SRC/vendor/SDL-release-3.4.14"
-
-# Build each component from fresh staged inputs so existing vendor/native files
-# are untouched. GLCompat's current CMake target includes etc2.c directly.
-cmake -S native/fshim -B "$RUN/build/fshim" -G Ninja \
+# Build the project sources into persistent CMake trees. Dependency sources and
+# their build outputs are retained under build/ for incremental later runs.
+run_logged "Configure fshim (CMake)" "$LOG_DIR/fshim-configure.log" \
+    cmake -S native/fshim -B "$FSHIM_BUILD" -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
-    -DGAME_INCLUDE_DIR="$RUN/build"
-ninja -C "$RUN/build/fshim" fshim
+    -DGAME_INCLUDE_DIR="$FACTORIO_BUILD"
+run_logged "Build fshim (Ninja)" "$LOG_DIR/fshim-build.log" \
+    "$NINJA" -C "$FSHIM_BUILD" fshim
 
-cmake -S "$SRC/SDL" -B "$RUN/build/sdl" -G Ninja \
+run_logged "Configure patched SDL $SDL_VERSION (CMake)" "$LOG_DIR/sdl-configure.log" \
+    cmake -S "$SDL_PATCHED" -B "$SDL_BUILD" -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
     -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_LIBC=ON
-ninja -C "$RUN/build/sdl" SDL3-shared
+run_logged "Build SDL3 $SDL_VERSION (Ninja/Clang)" "$LOG_DIR/sdl-build.log" \
+    "$NINJA" -C "$SDL_BUILD" SDL3-shared
 
-cmake -S "$SRC/native/glcompat" -B "$RUN/build/glcompat" -G Ninja \
+run_logged "Configure GLCompat (CMake)" "$LOG_DIR/glcompat-configure.log" \
+    cmake -S native/glcompat -B "$GLCOMPAT_BUILD" -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release
-ninja -C "$RUN/build/glcompat"
+    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
+    -DSDL_INCLUDE_DIR="$SDL_PATCHED/include"
+run_logged "Build GLCompat (Ninja/Clang)" "$LOG_DIR/glcompat-build.log" \
+    "$NINJA" -C "$GLCOMPAT_BUILD"
 
 # Mesa build.sh handles host tools and cross compilation. It is invoked only in
-# the disposable cloned source; BUILD_DIR redirects the Android build tree.
+# the pinned persistent dependency source; both host and Android build trees persist.
 (
     cd "$PANFROST_SOURCE"
-    PATH="$PWD/build-host/bin:$PATH" BUILD_DIR="$RUN/build/panfrost-android" \
+    run_logged "Build Panfrost host tools and Android libraries" "$LOG_DIR/panfrost-build.log" \
+        env PATH="$PWD/build-host/bin:$PATH" BUILD_DIR="$PANFROST_BUILD" \
         ./build.sh "$NDK"
 )
 
-# Package the base wrapper and backend-specific libraries from a fresh APK run.
-# The established APK recipe currently expects repository-local Android Java,
-# manifest and config template files. Keep intermediate artifacts run-unique.
+# Package the base wrapper and backend-specific libraries into this run's APK stage.
+step "Preparing Android wrapper APK package"
 PKG="$RUN/package"
 mkdir -p "$PKG/classes" "$PKG/dex" "$PKG/assets" "$PKG/stage/lib/arm64-v8a"
 cp android-wrapper/config.ini.template "$PKG/assets/config.ini.template"
 find android-wrapper/java -name '*.java' -print > "$PKG/sources.txt"
-javac --release 11 -Xlint:-options -cp "$ANDROID_JAR" -d "$PKG/classes" @"$PKG/sources.txt"
-jar cf "$PKG/classes.jar" -C "$PKG/classes" .
-d8 --release --min-api 26 --lib "$ANDROID_JAR" --output "$PKG/dex" "$PKG/classes.jar"
-aapt2 link -o "$PKG/base.apk" -I "$ANDROID_JAR" -A "$PKG/assets" --manifest android-wrapper/AndroidManifest.xml \
+run_logged "Compile Android Java wrapper" "$LOG_DIR/javac.log" \
+    javac --release 11 -Xlint:-options -cp "$ANDROID_JAR" -d "$PKG/classes" @"$PKG/sources.txt"
+run_logged "Assemble Java classes" "$LOG_DIR/jar.log" \
+    jar cf "$PKG/classes.jar" -C "$PKG/classes" .
+run_logged "Convert Java classes to DEX" "$LOG_DIR/d8.log" \
+    d8 --release --min-api 26 --lib "$ANDROID_JAR" --output "$PKG/dex" "$PKG/classes.jar"
+run_logged "Link Android wrapper manifest and assets" "$LOG_DIR/aapt2.log" \
+    aapt2 link -o "$PKG/base.apk" -I "$ANDROID_JAR" -A "$PKG/assets" --manifest android-wrapper/AndroidManifest.xml \
     --min-sdk-version 26 --target-sdk-version 33 --version-code 1 --version-name "$GAME_VERSION"
 KEYSTORE=${FACTORIO_KEYSTORE:-$ROOT/build/intermediate/debug.keystore}
 if [[ ! -f $KEYSTORE ]]; then
     mkdir -p "$(dirname -- "$KEYSTORE")"
-    keytool -genkeypair -noprompt -keystore "$KEYSTORE" -storepass android \
+    run_logged "Generate debug signing key" "$LOG_DIR/keytool.log" \
+        keytool -genkeypair -noprompt -keystore "$KEYSTORE" -storepass android \
         -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-        -validity 10000 -dname 'CN=Android Debug,O=Android,C=US' >/dev/null 2>&1
+        -validity 10000 -dname 'CN=Android Debug,O=Android,C=US'
 fi
 
 package_variant() {
     local variant=$1 backend=$2 suffix=$3 stage="$PKG/$1/stage" libs="$PKG/$1/libs" unsigned="$PKG/$1/unsigned.apk" aligned="$PKG/$1/aligned.apk" signed="$PKG/$1/signed.apk" target="$APKOUT/factorio-$GAME_VERSION-$3.apk"
+    step "Packaging and signing $variant variant: $(basename -- "$target")"
     mkdir -p "$stage/lib/arm64-v8a" "$libs"
-    cp "$RUN/build/sdl/libSDL3.so" "$libs/"
-    cp "$RUN/build/fshim/lib/libfshim.so" "$stage/lib/arm64-v8a/"
-    cp "$RUN/build/libfactorio_game.so" "$stage/lib/arm64-v8a/"
+    cp "$SDL_BUILD/libSDL3.so" "$libs/"
+    cp "$FSHIM_BUILD/lib/libfshim.so" "$stage/lib/arm64-v8a/"
+    cp "$FACTORIO_BUILD/libfactorio_game.so" "$stage/lib/arm64-v8a/"
     cp "$libs/libSDL3.so" "$stage/lib/arm64-v8a/"
     if [[ $backend == glcompat ]]; then
-        cp "$RUN/build/glcompat/lib/libGLCompat.so" "$stage/lib/arm64-v8a/"
+        cp "$GLCOMPAT_BUILD/lib/libGLCompat.so" "$stage/lib/arm64-v8a/"
     else
-        PANBUILD="$RUN/build/panfrost-android"
+        PANBUILD="$PANFROST_BUILD"
         PANLIB="$stage/lib/arm64-v8a"
         cp "$PANBUILD/src/egl/libEGL_mesa.so" "$PANLIB/"
         cp "$PANBUILD/src/mesa/glapi/es2api/libGLESv2_mesa.so" "$PANLIB/"
@@ -236,12 +306,18 @@ package_variant() {
     (cd "$stage" && zip -q -X -9 "$unsigned" classes.dex)
     mapfile -t native_entries < <(cd "$stage" && find lib/arm64-v8a -maxdepth 1 -type f -printf '%p\n' | sort)
     (cd "$stage" && zip -q -X -0 "$unsigned" "${native_entries[@]}")
-    zipalign -P 16 -f 4 "$unsigned" "$aligned"
-    apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-        --ks-key-alias androiddebugkey --out "$signed" "$aligned"
-    # noclobber publication; never replace a pre-existing output.
-    ln "$signed" "$target"
+    run_logged "Align $variant APK" "$LOG_DIR/zipalign-$variant.log" \
+        zipalign -P 16 -f 4 "$unsigned" "$aligned"
+    run_logged "Sign $variant APK" "$LOG_DIR/apksigner-$variant.log" \
+        apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias androiddebugkey --out "$signed" "$aligned"
+    run_logged "Verify $variant APK signature" "$LOG_DIR/verify-$variant.log" \
+        apksigner verify --print-certs "$signed"
+    # APKs are reproducible outputs; replace an existing regular APK in place.
+    [[ ! -L $target ]] || { echo "Refusing APK output symlink: $target" >&2; return 1; }
+    cp -f -- "$signed" "$target"
     echo "Created $target"
 }
 package_variant panfrost panfrost panfrost-experimental
 package_variant glcompat glcompat glcompat-unverisal
+printf '\nBuild completed. APKs are in %s\n' "$APKOUT"
