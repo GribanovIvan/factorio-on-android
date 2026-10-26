@@ -31,7 +31,7 @@ As for the other thing I used, Panfrost, it worked pretty much out of the box.
 
 # From my tests
 
-## Samsung Galaxy A51=
+## Samsung Galaxy A51
 
 - Exynos 9611, Mali-G72 MP3, about 3.5 GB RAM free idle
 - Android 13 (API 33), 2400×1080 display
@@ -82,8 +82,8 @@ Copy the Factorio *data* directory from the previously downloaded archive to:
 /storage/emulated/0/Android/data/org.factorio.android/files/data
 
 # Huge thanks to:
-https://github.com/JimVulkan/mali-panfrost for the actual working driver on Mali
-https://github.com/libsdl-org/SDL for being so damn portable and convenient
-https://gitlab.freedesktop.org/mesa for adreno specific code parts
-https://github.com/hglm/detex for texture decoding references 
-https://github.com/github-e51/factorio-native-arm-ipad for giving me an idea of trying to make it work on Android
+- https://github.com/JimVulkan/mali-panfrost for the actual working driver on Mali
+- https://github.com/libsdl-org/SDL for being so damn portable and convenient
+- https://gitlab.freedesktop.org/mesa for adreno specific code parts
+- https://github.com/hglm/detex for texture decoding references
+- https://github.com/github-e51/factorio-native-arm-ipad for giving me an idea of trying to make it work on Android
