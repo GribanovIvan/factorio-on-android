@@ -248,14 +248,43 @@ run_logged "Configure GLCompat (CMake)" "$LOG_DIR/glcompat-configure.log" \
 run_logged "Build GLCompat (Ninja/Clang)" "$LOG_DIR/glcompat-build.log" \
     "$NINJA" -C "$GLCOMPAT_BUILD"
 
-# Mesa build.sh handles host tools and cross compilation. It is invoked only in
-# the pinned persistent dependency source; both host and Android build trees persist.
-(
-    cd "$PANFROST_SOURCE"
-    run_logged "Build Panfrost host tools and Android libraries" "$LOG_DIR/panfrost-build.log" \
-        env PATH="$PWD/build-host/bin:$PATH" BUILD_DIR="$PANFROST_BUILD" \
-        ./build.sh "$NDK"
+# Mesa build.sh handles host tools and cross compilation. Its source and build
+# trees persist, but its script always invokes Ninja. Skip that invocation when
+# the complete output set is present and the source/build configuration matches.
+PANFROST_CACHE="$PANFROST_BUILD/.factorio-clean-cache-key"
+PANFROST_CACHE_KEY=$(printf '%s\n' \
+    "$PANFROST_COMMIT" "$NDK" "$(sha256sum "$PANFROST_SOURCE/build.sh" | awk '{print $1}')" \
+    "$(sha256sum "$PANFROST_SOURCE/meson.build" | awk '{print $1}')" \
+    "$("$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -n1)" | sha256sum | awk '{print $1}')
+PANFROST_OUTPUTS=(
+    "$PANFROST_SOURCE/build-host/bin/mesa_clc"
+    "$PANFROST_SOURCE/build-host/bin/vtn_bindgen2"
+    "$PANFROST_SOURCE/build-host/bin/panfrost_compile"
+    "$PANFROST_BUILD/src/egl/libEGL_mesa.so"
+    "$PANFROST_BUILD/src/mesa/glapi/es2api/libGLESv2_mesa.so"
+    "$PANFROST_BUILD/src/gallium/targets/dri/libgallium_dri.so"
+    "$PANFROST_BUILD/src/android_stub/libhardware.so"
+    "$PANFROST_BUILD/src/android_stub/liblog.so"
+    "$PANFROST_BUILD/src/android_stub/libnativewindow.so"
+    "$PANFROST_BUILD/src/android_stub/libsync.so"
 )
+PANFROST_OUTPUTS_READY=true
+for output in "${PANFROST_OUTPUTS[@]}"; do
+    [[ -s $output ]] || { PANFROST_OUTPUTS_READY=false; break; }
+done
+if [[ $PANFROST_OUTPUTS_READY == true && -f $PANFROST_CACHE && $(<"$PANFROST_CACHE") == "$PANFROST_CACHE_KEY" ]]; then
+    step "Reusing cached Panfrost host tools and Android libraries"
+    echo "    source: $PANFROST_SOURCE"
+    echo "    build: $PANFROST_BUILD"
+else
+    run_logged "Build Panfrost host tools and Android libraries" "$LOG_DIR/panfrost-build.log" \
+        env PATH="$PANFROST_SOURCE/build-host/bin:$PATH" BUILD_DIR="$PANFROST_BUILD" \
+        "$PANFROST_SOURCE/build.sh" "$NDK"
+    for output in "${PANFROST_OUTPUTS[@]}"; do
+        [[ -s $output ]] || { echo "Panfrost build did not produce required output: $output" >&2; exit 1; }
+    done
+    printf '%s\n' "$PANFROST_CACHE_KEY" > "$PANFROST_CACHE"
+fi
 
 # Package the base wrapper and backend-specific libraries into this run's APK stage.
 step "Preparing Android wrapper APK package"
