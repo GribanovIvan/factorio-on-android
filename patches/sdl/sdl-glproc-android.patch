@@ -1,0 +1,143 @@
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -23,6 +23,10 @@
+ 
+ // The high-level video driver subsystem
+ 
++#ifdef SDL_PLATFORM_ANDROID
++#include <dlfcn.h>
++#endif
++
+ #include "SDL_sysvideo.h"
+ #include "SDL_clipboard_c.h"
+ #include "SDL_egl_c.h"
+@@ -4753,6 +4757,49 @@
+         return NULL;
+     }
+     func = NULL;
++
++#ifdef SDL_PLATFORM_ANDROID
++    /* Factorio android port: libGLCompat.so translates the handful of GL 3.3
++     * entry points whose behaviour differs from GLES 3.2.  Resolve it lazily
++     * by name; bionic does not guarantee that a weak symbol from an earlier
++     * System.loadLibrary() is visible here.  The weak symbol is only a fast
++     * path/fallback. */
++    {
++#if defined(__GNUC__)
++        extern SDL_FunctionPointer fsgl_lookup(const char *name) __attribute__((weak));
++#endif
++        static int state = 0; /* 0=uninit, 1=dlopen, 2=weak, 3=absent */
++        static void *glcompat_handle;
++        static SDL_FunctionPointer (*glcompat_lookup)(const char *);
++        if (state == 0) {
++            glcompat_handle = dlopen("libGLCompat.so", RTLD_NOW | RTLD_GLOBAL);
++            if (glcompat_handle) {
++                *(void **)(&glcompat_lookup) = dlsym(glcompat_handle, "fsgl_lookup");
++                if (glcompat_lookup) {
++                    state = 1;
++                    SDL_Log("glcompat: fsgl_lookup resolved via dlopen(libGLCompat.so)");
++                }
++            }
++#if defined(__GNUC__)
++            if (!glcompat_lookup && fsgl_lookup) {
++                glcompat_lookup = fsgl_lookup;
++                state = 2;
++                SDL_Log("glcompat: fsgl_lookup resolved via weak symbol");
++            }
++#endif
++            if (!glcompat_lookup) {
++                state = 3;
++                SDL_Log("glcompat: libGLCompat.so/fsgl_lookup unavailable; using EGL only");
++            }
++        }
++        if (state == 1 || state == 2) {
++            func = glcompat_lookup(proc);
++            if (func) {
++                return func;
++            }
++        }
++    }
++#endif
+     if (_this->GL_GetProcAddress) {
+         if (_this->gl_config.driver_loaded) {
+             func = _this->GL_GetProcAddress(_this, proc);
+--- a/src/video/SDL_egl.c
++++ b/src/video/SDL_egl.c
+@@ -40,6 +40,29 @@
+ #include "SDL_egl_c.h"
+ #include "../SDL_hints_c.h"
+ 
++#ifdef SDL_VIDEO_DRIVER_ANDROID
++/* Factorio android port: the game asks SDL for a desktop OpenGL 3.3 core
++ * context.  Android EGL only offers OpenGL ES, so rewrite that request once,
++ * before the GL library is chosen and before the EGL config/context is made.
++ * The compatibility layer in libGLCompat.so then presents the ES context as
++ * desktop GL 3.3 to the game's GLAD loader. */
++static void SDL_EGL_AndroidDesktopGLCompat(SDL_VideoDevice *_this)
++{
++    if (!_this) {
++        return;
++    }
++    if (_this->gl_config.profile_mask != SDL_GL_CONTEXT_PROFILE_ES &&
++        _this->gl_config.major_version >= 3) {
++        SDL_Log("glcompat: context clamp: desktop GL %d.%d profile_mask=0x%x -> EGL OpenGL ES 3.2",
++                _this->gl_config.major_version, _this->gl_config.minor_version,
++                _this->gl_config.profile_mask);
++        _this->gl_config.profile_mask = SDL_GL_CONTEXT_PROFILE_ES;
++        _this->gl_config.major_version = 3;
++        _this->gl_config.minor_version = 2;
++    }
++}
++#endif
++
+ #ifdef EGL_KHR_create_context
+ // EGL_OPENGL_ES3_BIT_KHR was added in version 13 of the extension.
+ #ifndef EGL_OPENGL_ES3_BIT_KHR
+@@ -329,6 +352,9 @@
+ 
+ static bool SDL_EGL_LoadLibraryInternal(SDL_VideoDevice *_this, const char *egl_path)
+ {
++#ifdef SDL_VIDEO_DRIVER_ANDROID
++    SDL_EGL_AndroidDesktopGLCompat(_this);
++#endif
+     SDL_SharedObject *egl_dll_handle = NULL;
+ #if !defined(SDL_VIDEO_STATIC_ANGLE) && !defined(SDL_VIDEO_DRIVER_VITA)
+     SDL_SharedObject *opengl_dll_handle = NULL;
+@@ -955,6 +981,9 @@
+ 
+ bool SDL_EGL_ChooseConfig(SDL_VideoDevice *_this)
+ {
++#ifdef SDL_VIDEO_DRIVER_ANDROID
++    SDL_EGL_AndroidDesktopGLCompat(_this);
++#endif
+     if (!_this->egl_data) {
+         return SDL_SetError("EGL not initialized");
+     }
+@@ -975,6 +1004,9 @@
+ 
+ SDL_GLContext SDL_EGL_CreateContext(SDL_VideoDevice *_this, EGLSurface egl_surface)
+ {
++#ifdef SDL_VIDEO_DRIVER_ANDROID
++    SDL_EGL_AndroidDesktopGLCompat(_this);
++#endif
+     // max 16 key+value pairs plus terminator.
+     EGLint attribs[33];
+     int attr = 0;
+@@ -1051,8 +1083,15 @@
+         } else
+ #endif // EGL_KHR_create_context
+         {
+-            SDL_SetError("Could not create EGL context (context attributes are not supported)");
+-            return NULL;
++            if (profile_es) {
++                /* Android EGL may not advertise EGL_KHR_create_context; the
++                 * legacy client-version attribute still gives us ES 3.x. */
++                attribs[attr++] = EGL_CONTEXT_CLIENT_VERSION;
++                attribs[attr++] = SDL_max(major_version, 3);
++            } else {
++                SDL_SetError("Could not create EGL context (context attributes are not supported)");
++                return NULL;
++            }
+         }
+     }
+ 

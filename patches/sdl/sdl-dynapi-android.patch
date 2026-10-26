@@ -1,0 +1,50 @@
+SDL3 3.4.14 needs these two edits before building libSDL3.so for the Android
+port.  SDL's dynapi master switch force-disables itself on Android
+(src/dynapi/SDL_dynapi.h), but the game embeds its own static SDL3 and swaps
+the jump table at runtime via SDL3_DYNAMIC_API, so our build must export
+SDL_DYNAPI_entry (SDL_InitDynamicAPILocked() looks it up with dlsym()).
+Once enabled, dynapi_procs.h mentions JavaVM for the JNI_OnLoad entry, which
+needs <jni.h> on Android.
+
+Apply from the root of an SDL-release-3.4.14 source tree:
+
+    patch -p1 < native/sdl-dynapi-android.patch
+
+Then configure/build as usual (SDL_SHARED=ON) and check the entry point:
+
+    readelf --dyn-syms -W libSDL3.so | grep SDL_DYNAPI_entry
+
+Without this, the game prints
+    SDL Dynamic API Failure!
+    Couldn't load an overriding SDL library...
+and silently falls back to its statically linked SDL.
+
+--- a/src/dynapi/SDL_dynapi.h
++++ b/src/dynapi/SDL_dynapi.h
+@@ -47,8 +47,12 @@
+ #define SDL_DYNAMIC_API 0
+ #elif defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE // probably not useful on iOS.
+ #define SDL_DYNAMIC_API 0
+-#elif defined(SDL_PLATFORM_ANDROID) // probably not useful on Android.
+-#define SDL_DYNAMIC_API 0
++// Factorio android port: SDL upstream disables dynapi on Android
++// ("probably not useful on Android"), but the game embeds its own static
++// SDL3 and replaces the jump table at runtime via SDL3_DYNAMIC_API, so this
++// build must export SDL_DYNAPI_entry.  Keep it enabled.
++//#elif defined(SDL_PLATFORM_ANDROID)
++//#define SDL_DYNAMIC_API 0
+ #elif defined(SDL_PLATFORM_EMSCRIPTEN) // probably not useful on Emscripten.
+ #define SDL_DYNAMIC_API 0
+ #elif defined(SDL_PLATFORM_PS2) && SDL_PLATFORM_PS2
+--- a/src/dynapi/SDL_dynapi.c
++++ b/src/dynapi/SDL_dynapi.c
+@@ -38,6 +38,9 @@
+ #endif
+ 
+ #include <SDL3/SDL.h>
++#ifdef SDL_PLATFORM_ANDROID
++#include <jni.h>  /* SDL_dynapi_procs.h references JavaVM for JNI_OnLoad */
++#endif
+ #define SDL_MAIN_NOIMPL // don't drag in header-only implementation of SDL_main
+ #include <SDL3/SDL_main.h>
+ #include "../core/SDL_core_unsupported.h"

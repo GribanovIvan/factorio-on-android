@@ -1,0 +1,6 @@
+{
+    global:
+        fsgl_lookup;
+    local:
+        *;
+};

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.factorio.android"
+    android:versionCode="1"
+    android:versionName="2.1.23">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+
+    <!-- Factorio LAN join uses UDP sockets. Without INTERNET Android denies
+         socket networking to this package (the game aborts at socket open). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <uses-feature android:glEsVersion="0x00030002" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="Factorio"
+        android:extractNativeLibs="true"
+        android:largeHeap="true"
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:hardwareAccelerated="true">
+
+        <!-- Touch-to-mouse synthesis: the desktop game is mouse-driven.
+             Applied by SDL itself via SDLActivity.getManifestEnvironmentVariables()
+             during SDL init.  Hint names are the string values SDL looks up
+             (SDL_HINT_TOUCH_MOUSE_EVENTS is the C macro name, not the string). -->
+        <meta-data android:name="SDL_ENV.SDL_TOUCH_MOUSE_EVENTS" android:value="1" />
+        <meta-data android:name="SDL_ENV.SDL_MOUSE_TOUCH_EVENTS" android:value="0" />
+
+        <activity
+            android:name=".FactorioActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

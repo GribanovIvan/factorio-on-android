@@ -1,0 +1,18 @@
+# Native shared-library outputs
+*.so
+__pycache__/
+*.py[cod]
+
+# Vendored dependency trees (keep project SDL patches trackable)
+/vendor/SDL-release-3.4.14/
+/vendor/mali-panfrost/
+/build/dependencies/sdl/
+/build/dependencies/SDL/
+/build/dependencies/panfrost/
+/build/dependencies/mali-panfrost/
+
+# Build intermediates and published APKs
+/build/
+
+# Manually supplied Factorio archives (keep the input directory itself local)
+/input/*
