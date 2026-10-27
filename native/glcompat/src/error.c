@@ -39,7 +39,7 @@ void fsgl_err_log(int prio, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    __android_log_vprint(prio, ERR_TAG, fmt, ap);
+    fsgl_vlog(prio, ERR_TAG, fmt, ap);
     va_end(ap);
 }
 

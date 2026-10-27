@@ -98,11 +98,44 @@
 
 #define TAG "glcompat"
 
+#if FSGL_DIAG
+static FILE *g_logfile;
+static pthread_once_t g_logfile_once = PTHREAD_ONCE_INIT;
+
+static void logfile_open(void)
+{
+    const char *path = getenv("FSGL_LOG_FILE");
+    if (!path || !*path) {
+        path = "/storage/emulated/0/Android/data/org.factorio.android/files/glcompat.log";
+    }
+    g_logfile = fopen(path, "w");
+    if (g_logfile) {
+        setvbuf(g_logfile, NULL, _IOLBF, 0);
+    }
+}
+#endif
+
+void fsgl_vlog(int prio, const char *tag, const char *fmt, va_list ap)
+{
+#if FSGL_DIAG
+    va_list copy;
+    va_copy(copy, ap);
+    pthread_once(&g_logfile_once, logfile_open);
+    if (g_logfile) {
+        fprintf(g_logfile, "%.3f %s: ", (double)fsgl_now_ns() / 1e9, tag);
+        vfprintf(g_logfile, fmt, copy);
+        fputc('\n', g_logfile);
+    }
+    va_end(copy);
+#endif
+    __android_log_vprint(prio, tag, fmt, ap);
+}
+
 void fsgl_log(int prio, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    __android_log_vprint(prio, TAG, fmt, ap);
+    fsgl_vlog(prio, TAG, fmt, ap);
     va_end(ap);
 }
 
@@ -120,7 +153,7 @@ void fsgl_log_once_impl(const char *key, const char *fmt, ...)
     }
     va_list ap;
     va_start(ap, fmt);
-    __android_log_vprint(ANDROID_LOG_INFO, TAG, fmt, ap);
+    fsgl_vlog(ANDROID_LOG_INFO, TAG, fmt, ap);
     va_end(ap);
 }
 
@@ -263,6 +296,16 @@ static const char *const k_real_names[FSGL_R_COUNT] = {
     [FSGL_R_glWaitSync] = "glWaitSync",
     [FSGL_R_glFinish] = "glFinish",
     [FSGL_R_glFlush] = "glFlush",
+
+    [FSGL_R_glClear] = "glClear",
+    [FSGL_R_glClearBufferfv] = "glClearBufferfv",
+    [FSGL_R_glClearBufferfi] = "glClearBufferfi",
+    [FSGL_R_glInvalidateFramebuffer] = "glInvalidateFramebuffer",
+    [FSGL_R_glBlitFramebuffer] = "glBlitFramebuffer",
+    [FSGL_R_glDrawElementsInstanced] = "glDrawElementsInstanced",
+    [FSGL_R_glDrawElementsBaseVertex] = "glDrawElementsBaseVertex",
+    [FSGL_R_glDrawRangeElements] = "glDrawRangeElements",
+    [FSGL_R_glAttachShader] = "glAttachShader",
 };
 
 FSGLProc fsgl_real_slow(FsglRealId id)

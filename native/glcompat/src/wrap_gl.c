@@ -257,6 +257,7 @@ static void GL_APIENTRY wrap_glGetIntegerv(GLenum pname, GLint *params)
 
 typedef struct {
     GLuint id;
+    GLenum stage;
     char *source;
 } ShaderRec;
 
@@ -274,7 +275,7 @@ static ShaderRec *shader_find(GLuint id)
     return NULL;
 }
 
-static void shader_store(GLuint id, char *source)
+static void shader_store(GLuint id, GLenum stage, char *source)
 {
     ShaderRec *r = shader_find(id);
     if (!r) {
@@ -292,8 +293,18 @@ static void shader_store(GLuint id, char *source)
         r->id = id;
         r->source = NULL;
     }
+    r->stage = stage;
     free(r->source);
     r->source = source;
+}
+
+const char *fsgl_shader_source(GLuint shader, GLenum *stage)
+{
+    ShaderRec *r = shader_find(shader);
+    if (stage) {
+        *stage = r ? r->stage : 0;
+    }
+    return r ? r->source : NULL;
 }
 
 static void shader_remove(GLuint id)
@@ -371,7 +382,7 @@ static void GL_APIENTRY wrap_glShaderSource(GLuint shader, GLsizei count,
     } else {
         free(joined);
     }
-    shader_store(shader, translated);
+    shader_store(shader, stage, translated);
     if (changed) {
         fsgl_log(ANDROID_LOG_INFO, "shader %u: translated desktop GLSL to GLSL ES 3.20 (%zu bytes)%s",
                  shader, strlen(translated),
@@ -911,6 +922,9 @@ static void GL_APIENTRY wrap_glDrawArrays(GLenum mode, GLint first, GLsizei coun
         fsgl_err_end_extra("glDrawArrays");
         fsgl_baseinstance_set_dirty(false);
     }
+#if FSGL_DIAG
+    fsgl_ft_draw(false, false);
+#endif
     fsgl_stream_note_draw("glDrawArrays", 0, count, (const void *)(uintptr_t)first);
     PFN_glDrawArrays real = (PFN_glDrawArrays)fsgl_real_id(FSGL_R_glDrawArrays);
     if (real) {
@@ -940,6 +954,9 @@ static void GL_APIENTRY wrap_glDrawElements(GLenum mode, GLsizei count, GLenum t
         fsgl_err_end_extra("glDrawElements");
         fsgl_baseinstance_set_dirty(false);
     }
+#if FSGL_DIAG
+    fsgl_ft_draw(false, false);
+#endif
     fsgl_stream_note_draw("glDrawElements",
                           fsgl_buf_bound(GL_ELEMENT_ARRAY_BUFFER), count, indices);
     PFN_glDrawElements real = (PFN_glDrawElements)fsgl_real_id(FSGL_R_glDrawElements);
@@ -961,6 +978,9 @@ static void GL_APIENTRY wrap_glDrawArraysInstancedBaseInstance(GLenum mode, GLin
     fsgl_ring_push("glDrawArraysInstancedBaseInstance", (uintptr_t)mode,
                    (uintptr_t)first, (uintptr_t)count, (uintptr_t)baseinstance);
 
+#if FSGL_DIAG
+    fsgl_ft_draw(true, false);
+#endif
     fsgl_stream_note_draw("glDrawArraysInstancedBaseInstance", 0, count,
                           (const void *)(uintptr_t)first);
     PFN_glDrawArraysInstanced draw =
@@ -1487,6 +1507,23 @@ void GL_APIENTRY fsgl_wrap_glGetCompressedTexImage(GLenum, GLint, void *);
 void GL_APIENTRY fsgl_wrap_glGetTexLevelParameteriv(GLenum, GLint, GLenum, GLint *);
 void GL_APIENTRY fsgl_wrap_glGenerateMipmap(GLenum);
 
+#if FSGL_DIAG
+/* frametrace.c */
+void GL_APIENTRY fsgl_ft_glBindFramebuffer(GLenum, GLuint);
+void GL_APIENTRY fsgl_ft_glViewport(GLint, GLint, GLsizei, GLsizei);
+void GL_APIENTRY fsgl_ft_glClear(GLbitfield);
+void GL_APIENTRY fsgl_ft_glClearBufferfv(GLenum, GLint, const GLfloat *);
+void GL_APIENTRY fsgl_ft_glClearBufferfi(GLenum, GLint, GLfloat, GLint);
+void GL_APIENTRY fsgl_ft_glInvalidateFramebuffer(GLenum, GLsizei, const GLenum *);
+void GL_APIENTRY fsgl_ft_glBlitFramebuffer(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+                                           GLbitfield, GLenum);
+void GL_APIENTRY fsgl_ft_glDrawArraysInstanced(GLenum, GLint, GLsizei, GLsizei);
+void GL_APIENTRY fsgl_ft_glDrawElementsInstanced(GLenum, GLsizei, GLenum, const void *, GLsizei);
+void GL_APIENTRY fsgl_ft_glDrawElementsBaseVertex(GLenum, GLsizei, GLenum, const void *, GLint);
+void GL_APIENTRY fsgl_ft_glDrawRangeElements(GLenum, GLuint, GLuint, GLsizei, GLenum, const void *);
+void GL_APIENTRY fsgl_ft_glAttachShader(GLuint, GLuint);
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Lookup table                                                        */
 /* ------------------------------------------------------------------ */
@@ -1550,6 +1587,18 @@ static const Entry k_entries[] = {
     { "glFlush", (FSGLProc)wrap_glFlush, E_DIAG },
     { "glReadPixels", (FSGLProc)wrap_glReadPixels, E_DIAG },
     { "glBufferSubData", (FSGLProc)wrap_glBufferSubData, E_DIAG },
+    { "glBindFramebuffer", (FSGLProc)fsgl_ft_glBindFramebuffer, E_DIAG },
+    { "glViewport", (FSGLProc)fsgl_ft_glViewport, E_DIAG },
+    { "glClear", (FSGLProc)fsgl_ft_glClear, E_DIAG },
+    { "glClearBufferfv", (FSGLProc)fsgl_ft_glClearBufferfv, E_DIAG },
+    { "glClearBufferfi", (FSGLProc)fsgl_ft_glClearBufferfi, E_DIAG },
+    { "glInvalidateFramebuffer", (FSGLProc)fsgl_ft_glInvalidateFramebuffer, E_DIAG },
+    { "glBlitFramebuffer", (FSGLProc)fsgl_ft_glBlitFramebuffer, E_DIAG },
+    { "glDrawArraysInstanced", (FSGLProc)fsgl_ft_glDrawArraysInstanced, E_DIAG },
+    { "glDrawElementsInstanced", (FSGLProc)fsgl_ft_glDrawElementsInstanced, E_DIAG },
+    { "glDrawElementsBaseVertex", (FSGLProc)fsgl_ft_glDrawElementsBaseVertex, E_DIAG },
+    { "glDrawRangeElements", (FSGLProc)fsgl_ft_glDrawRangeElements, E_DIAG },
+    { "glAttachShader", (FSGLProc)fsgl_ft_glAttachShader, E_DIAG },
 #endif
 
     { "glSamplerParameteri", (FSGLProc)wrap_glSamplerParameteri, E_WRAP },

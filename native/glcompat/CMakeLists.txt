@@ -28,7 +28,8 @@ add_library(GLCompat SHARED
     src/etc2.c
     src/wrap_gl.c
     src/stream.c
-    src/wrap_tex.c)
+    src/wrap_tex.c
+    src/frametrace.c)
 
 target_compile_definitions(GLCompat PRIVATE _GNU_SOURCE
     FSGL_DIAG=$<IF:$<BOOL:${GLCOMPAT_DIAG}>,1,0>)

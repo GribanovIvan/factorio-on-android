@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -152,6 +153,17 @@ typedef enum {
     FSGL_R_glFinish,
     FSGL_R_glFlush,
 
+    /* frametrace.c (FSGL_DIAG) */
+    FSGL_R_glClear,
+    FSGL_R_glClearBufferfv,
+    FSGL_R_glClearBufferfi,
+    FSGL_R_glInvalidateFramebuffer,
+    FSGL_R_glBlitFramebuffer,
+    FSGL_R_glDrawElementsInstanced,
+    FSGL_R_glDrawElementsBaseVertex,
+    FSGL_R_glDrawRangeElements,
+    FSGL_R_glAttachShader,
+
     FSGL_R_COUNT
 } FsglRealId;
 
@@ -171,6 +183,9 @@ static inline FSGLProc fsgl_real_id(FsglRealId id)
 }
 
 void fsgl_log(int prio, const char *fmt, ...);
+/* Logcat under `tag`; FSGL_DIAG builds also append to glcompat.log next to
+ * glcompat.ini (logcat drops lines on some vendor builds). */
+void fsgl_vlog(int prio, const char *tag, const char *fmt, va_list ap);
 void fsgl_log_once_impl(const char *key, const char *fmt, ...);
 void fsgl_err_log(int prio, const char *fmt, ...);
 
@@ -467,6 +482,12 @@ void fsgl_stream_note_draw(const char *kind, GLuint ebo, GLsizei count,
                            const void *indices);
 
 void fsgl_stream_report(void);
+
+/* frametrace.c (FSGL_DIAG): draw hook for the wrapped draw calls. */
+void fsgl_ft_draw(bool instanced, bool base_vertex);
+
+/* Translated source and stage of a shader the layer has seen, or NULL. */
+const char *fsgl_shader_source(GLuint shader, GLenum *stage);
 
 /* glcompat.ini "fake_s3tc": advertise GL_EXT_texture_compression_s3tc and
  * _rgtc although the driver lacks them; uploads are transcoded (wrap_tex.c).

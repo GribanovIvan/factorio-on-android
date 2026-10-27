@@ -635,6 +635,49 @@ static void record_transcoded(GLenum target, GLint level, GLenum src_fmt,
     }
 }
 
+/* Storage-only allocation (no data) of a DXT/RGTC level the driver cannot
+ * decode: allocate it in the transcoder's destination format so the game's
+ * later glCompressedTexSubImage2D updates, which are transcoded, have a level
+ * to land on.  Returns false for formats without a destination (DXT1A). */
+static bool alloc_transcoded_level(GLenum target, GLint level, GLenum internalformat,
+                                   GLsizei width, GLsizei height, GLint border)
+{
+    uint32_t alloc_fmt = fsgl_etc2_dest_format(internalformat);
+    if (alloc_fmt == FSGL_ETC2_RGB8 || alloc_fmt == FSGL_ETC2_RGBA8) {
+        PFN_glCompressedTexImage2D real_a = get_cteximage2d();
+        size_t dsz = fsgl_etc2_dest_size(alloc_fmt, width, height);
+        if (real_a) {
+            real_a(target, level, (GLenum)alloc_fmt, width, height, border,
+                   (GLsizei)dsz, NULL);
+        }
+        fsgl_err_check("glCompressedTexImage2D",
+                       "target=0x%x level=%d (ETC2 alloc, no data)",
+                       (unsigned)target, (int)level);
+        record_transcoded(target, level, internalformat, alloc_fmt, width, height, dsz);
+        fsgl_log_once("compressed-alloc",
+                      "compressed: allocating 0x%04x %dx%d level %d as ETC2 "
+                      "(no data)", internalformat, width, height, level);
+        return true;
+    }
+    if (alloc_fmt == FSGL_R8 || alloc_fmt == FSGL_RG8) {
+        PFN_glTexImage2D tex2d = get_teximage2d();
+        if (tex2d) {
+            tex2d(target, level, (GLint)alloc_fmt, width, height, border,
+                  alloc_fmt == FSGL_R8 ? GL_RED : GL_RG, GL_UNSIGNED_BYTE, NULL);
+        }
+        fsgl_err_check("glCompressedTexImage2D",
+                       "target=0x%x level=%d (R8/RG8 alloc, no data)",
+                       (unsigned)target, (int)level);
+        record_transcoded(target, level, internalformat, alloc_fmt, width, height, 0);
+        fsgl_log_once("compressed-alloc-rgtc",
+                      "compressed: allocating 0x%04x %dx%d level %d as %s "
+                      "(no data)", internalformat, width, height, level,
+                      alloc_fmt == FSGL_R8 ? "R8" : "RG8");
+        return true;
+    }
+    return false;
+}
+
 void GL_APIENTRY fsgl_wrap_glTexImage2D(GLenum target, GLint level, GLint internalformat,
                                      GLsizei width, GLsizei height, GLint border,
                                      GLenum format, GLenum type, const void *pixels)
@@ -647,6 +690,27 @@ void GL_APIENTRY fsgl_wrap_glTexImage2D(GLenum target, GLint level, GLint intern
     if (!real) {
         FSGL_PROF_END(0, 0);
         return;
+    }
+    /* Desktop GL accepts a DXT/RGTC internalformat in glTexImage2D and
+     * allocates compressed storage; ES rejects it with INVALID_VALUE.  The
+     * game allocates its compressed atlases (shadows, alpha masks, and every
+     * colour atlas once S3TC is advertised) exactly this way, with no data,
+     * then fills them with glCompressedTexSubImage2D. */
+    bool decode_later = false;
+    if ((is_dxt((GLenum)internalformat) || is_rgtc((GLenum)internalformat)) &&
+        !driver_supports_compressed((GLenum)internalformat)) {
+        if (!pixels && alloc_transcoded_level(target, level, (GLenum)internalformat,
+                                              width, height, border)) {
+            FSGL_PROF_END(0, 0);
+            return;
+        }
+        /* With data (or DXT1A): keep it uncompressed in the caller's format;
+         * later compressed sub-updates take the RGBA decode path. */
+        fsgl_log_once("teximage-compressed-ifmt",
+                      "upload: glTexImage2D internalformat 0x%04x stored uncompressed (%s)",
+                      internalformat, pixels ? "with data" : "no transcode target");
+        internalformat = (GLint)format;
+        decode_later = true;
     }
     GLint mapped = map_internal_format(internalformat);
     if (mapped != internalformat) {
@@ -687,6 +751,12 @@ void GL_APIENTRY fsgl_wrap_glTexImage2D(GLenum target, GLint level, GLint intern
                    (unsigned)target, (int)level, (unsigned)mapped, (int)width, (int)height,
                    (int)border, (unsigned)format, (unsigned)type);
     record_upload(target, level, mapped, format, type, width, height, 1);
+    if (decode_later) {
+        FsglTexLevel *lvl = fsgl_tex_level(fsgl_tex_get(fsgl_tex_bound(target), false), level);
+        if (lvl) {
+            lvl->decoded = true;
+        }
+    }
 }
 
 void GL_APIENTRY fsgl_wrap_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
@@ -863,45 +933,10 @@ void GL_APIENTRY fsgl_wrap_glCompressedTexImage2D(GLenum target, GLint level, GL
          * forwarding the DXT format fails and leaves the level undefined,
          * which made every streamed mip update fail with
          * INVALID_OPERATION). */
-        if (!data) {
-            uint32_t alloc_fmt = fsgl_etc2_dest_format(internalformat);
-            if (alloc_fmt == FSGL_ETC2_RGB8 || alloc_fmt == FSGL_ETC2_RGBA8) {
-                PFN_glCompressedTexImage2D real_a = get_cteximage2d();
-                size_t dsz = fsgl_etc2_dest_size(alloc_fmt, width, height);
-                if (real_a) {
-                    real_a(target, level, (GLenum)alloc_fmt, width, height, border,
-                           (GLsizei)dsz, NULL);
-                }
-                fsgl_err_check("glCompressedTexImage2D",
-                               "target=0x%x level=%d (ETC2 alloc, no data)",
-                               (unsigned)target, (int)level);
-                record_transcoded(target, level, internalformat, alloc_fmt,
-                                  width, height, dsz);
-                FSGL_PROF_END(0, 0);
-                fsgl_log_once("compressed-alloc",
-                              "compressed: allocating 0x%04x %dx%d level %d as ETC2 "
-                              "(no data)", internalformat, width, height, level);
-                return;
-            }
-            if (alloc_fmt == FSGL_R8 || alloc_fmt == FSGL_RG8) {
-                PFN_glTexImage2D tex2d = get_teximage2d();
-                if (tex2d) {
-                    tex2d(target, level, (GLint)alloc_fmt, width, height, border,
-                          alloc_fmt == FSGL_R8 ? GL_RED : GL_RG, GL_UNSIGNED_BYTE,
-                          NULL);
-                }
-                fsgl_err_check("glCompressedTexImage2D",
-                               "target=0x%x level=%d (R8/RG8 alloc, no data)",
-                               (unsigned)target, (int)level);
-                record_transcoded(target, level, internalformat, alloc_fmt,
-                                  width, height, 0);
-                FSGL_PROF_END(0, 0);
-                fsgl_log_once("compressed-alloc-rgtc",
-                              "compressed: allocating 0x%04x %dx%d level %d as %s "
-                              "(no data)", internalformat, width, height, level,
-                              alloc_fmt == FSGL_R8 ? "R8" : "RG8");
-                return;
-            }
+        if (!data && alloc_transcoded_level(target, level, internalformat, width, height,
+                                            border)) {
+            FSGL_PROF_END(0, 0);
+            return;
         }
         fsgl_err_begin_extra("glCompressedTexImage2D");
         uint32_t dest_fmt = 0;
