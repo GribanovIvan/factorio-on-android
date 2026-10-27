@@ -82,6 +82,13 @@ FsglProf fsgl_prof_table[FSGL_P_COUNT] = {
     [FSGL_P_glSamplerParameterf] = { "glSamplerParameterf", 0, 0, 0, 0, 0, false },
     [FSGL_P_glSamplerParameterfv] = { "glSamplerParameterfv", 0, 0, 0, 0, 0, false },
     [FSGL_P_glSamplerParameteriv] = { "glSamplerParameteriv", 0, 0, 0, 0, 0, false },
+
+    [FSGL_P_glClientWaitSync] = { "glClientWaitSync", 0, 0, 0, 0, 0, false },
+    [FSGL_P_glWaitSync] = { "glWaitSync", 0, 0, 0, 0, 0, false },
+    [FSGL_P_glFinish] = { "glFinish", 0, 0, 0, 0, 0, false },
+    [FSGL_P_glFlush] = { "glFlush", 0, 0, 0, 0, 0, false },
+    [FSGL_P_glReadPixels] = { "glReadPixels", 0, 0, 0, 0, 0, true },
+    [FSGL_P_glBufferSubData] = { "glBufferSubData", 0, 0, 0, 0, 0, true },
 };
 
 uint64_t fsgl_now_ns(void)
@@ -113,7 +120,7 @@ static void prof_dump(void)
         return;
     }
 
-    /* Insertion sort by descending total time; n is ~44. */
+    /* Insertion sort by descending total time; n is ~60. */
     for (int i = 1; i < n; i++) {
         int v = order[i];
         int j = i - 1;
@@ -179,8 +186,12 @@ void fsgl_prof_start(void)
     pthread_once(&g_prof_once, prof_init);
 }
 
+/* Release builds start the dump thread only when the stream trace is
+ * enabled from glcompat.ini (stream.c calls fsgl_prof_start()). */
+#if FSGL_DIAG
 __attribute__((constructor)) static void prof_ctor(void)
 {
     fsgl_prof_start();
     atexit(prof_dump);
 }
+#endif

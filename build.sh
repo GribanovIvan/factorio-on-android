@@ -244,7 +244,8 @@ run_logged "Configure GLCompat (CMake)" "$LOG_DIR/glcompat-configure.log" \
     -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
-    -DSDL_INCLUDE_DIR="$SDL_PATCHED/include"
+    -DSDL_INCLUDE_DIR="$SDL_PATCHED/include" \
+    -DGLCOMPAT_DIAG="${GLCOMPAT_DIAG:-OFF}"
 run_logged "Build GLCompat (Ninja/Clang)" "$LOG_DIR/glcompat-build.log" \
     "$NINJA" -C "$GLCOMPAT_BUILD"
 

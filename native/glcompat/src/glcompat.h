@@ -28,6 +28,21 @@
 #define GL_MAP_FLUSH_EXPLICIT_BIT 0x0040
 #endif
 
+/* Diagnostics build switch (CMake option GLCOMPAT_DIAG).
+ *
+ * FSGL_DIAG=1 keeps the full rev-2 instrumentation: per-wrapper profiler
+ * (two clock reads per call), the call ring, a real glGetError() after every
+ * forwarded call, the periodic stream report and the timing-only stall probes
+ * (glClientWaitSync, glFinish, ...).
+ *
+ * FSGL_DIAG=0 (release) compiles all of that out.  Wrappers then do only the
+ * translation work they exist for, and entry points that were wrapped purely
+ * for bookkeeping are handed to the game as the driver's own pointers.  Layer
+ * internal error hygiene (fsgl_err_begin_extra/end_extra) stays in both. */
+#ifndef FSGL_DIAG
+#define FSGL_DIAG 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -133,6 +148,10 @@ typedef enum {
 
     FSGL_R_glGenerateMipmap,
 
+    FSGL_R_glWaitSync,
+    FSGL_R_glFinish,
+    FSGL_R_glFlush,
+
     FSGL_R_COUNT
 } FsglRealId;
 
@@ -152,8 +171,22 @@ static inline FSGLProc fsgl_real_id(FsglRealId id)
 }
 
 void fsgl_log(int prio, const char *fmt, ...);
-void fsgl_log_once(const char *key, const char *fmt, ...);
+void fsgl_log_once_impl(const char *key, const char *fmt, ...);
 void fsgl_err_log(int prio, const char *fmt, ...);
+
+/* Log once per key.  Several wrappers call this on every invocation, so each
+ * call site keeps its own flag and only the first visit pays for the key
+ * table scan and argument formatting.  Keys shared between sites are still
+ * de-duplicated by the table.  Use fsgl_log_once_impl() directly when one
+ * site logs several distinct (non-literal) keys. */
+#define fsgl_log_once(key, ...)                                                \
+    do {                                                                       \
+        static bool fsgl_once_done_;                                           \
+        if (!fsgl_once_done_) {                                                \
+            fsgl_once_done_ = true;                                            \
+            fsgl_log_once_impl((key), __VA_ARGS__);                            \
+        }                                                                      \
+    } while (0)
 
 /* ------------------------------------------------------------------ */
 /* Profiler                                                            */
@@ -221,6 +254,16 @@ typedef enum {
     FSGL_P_glSamplerParameterfv,
     FSGL_P_glSamplerParameteriv,
 
+    /* Timing-only stall probes (FSGL_DIAG builds).  These calls are not
+     * otherwise wrapped, so a CPU<->GPU sync hidden in them would never show
+     * up in the profile. */
+    FSGL_P_glClientWaitSync,
+    FSGL_P_glWaitSync,
+    FSGL_P_glFinish,
+    FSGL_P_glFlush,
+    FSGL_P_glReadPixels,
+    FSGL_P_glBufferSubData,
+
     FSGL_P_COUNT
 } FsglProfId;
 
@@ -241,6 +284,7 @@ uint64_t fsgl_now_ns(void);
 /* Starts the 10 s dump thread once; safe to call repeatedly. */
 void fsgl_prof_start(void);
 
+#if FSGL_DIAG
 /* Exactly two clock reads per intercepted call.  No logging in the hot path. */
 #define FSGL_PROF_BEGIN(pid)                                                   \
     FsglProf *fsgl_pf = &fsgl_prof_table[FSGL_P_##pid];                        \
@@ -257,6 +301,10 @@ void fsgl_prof_start(void);
         fsgl_pf->bytes_in += (uint64_t)(_bin);                                 \
         fsgl_pf->bytes_out += (uint64_t)(_bout);                               \
     } while (0)
+#else
+#define FSGL_PROF_BEGIN(pid) ((void)0)
+#define FSGL_PROF_END(_bin, _bout) ((void)(_bin), (void)(_bout))
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Error attribution                                                   */
@@ -264,8 +312,16 @@ void fsgl_prof_start(void);
 
 /* Per-thread ring of the last 8 intercepted calls: name + up to 4 integer
  * arguments.  No formatting in the hot path. */
+#if FSGL_DIAG
 void fsgl_ring_push(const char *name, uintptr_t a0, uintptr_t a1,
                     uintptr_t a2, uintptr_t a3);
+#else
+static inline void fsgl_ring_push(const char *name, uintptr_t a0, uintptr_t a1,
+                                  uintptr_t a2, uintptr_t a3)
+{
+    (void)name; (void)a0; (void)a1; (void)a2; (void)a3;
+}
+#endif
 
 /* Wrapper for glGetError: returns queued errors first, logs the ring once per
  * distinct caller return address (rate limited), then the driver error.
@@ -282,9 +338,17 @@ void fsgl_err_end_extra(const char *name);
 /* Call immediately after the caller's forwarded driver call (and before any
  * internal restore calls).  Consumes that call's error, logs it with the
  * supplied full parameters (rate limited per (name,error) pair), and queues
- * it so the caller still observes it from glGetError. */
+ * it so the caller still observes it from glGetError.
+ *
+ * Release builds compile this out: the driver keeps the error in its own
+ * flag, the game reads it through the glGetError wrapper as before, and the
+ * extra glGetError per forwarded call disappears. */
+#if FSGL_DIAG
 void fsgl_err_check(const char *name, const char *params_fmt, ...)
     __attribute__((format(printf, 2, 3)));
+#else
+#define fsgl_err_check(...) ((void)0)
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Extension list                                                      */
@@ -370,7 +434,8 @@ void fsgl_buf_remove(GLuint id);
  * safe without the per-map driver stall. */
 
 /* Called before/after the real glMapBufferRange.  Returns an opaque slot
- * (>= 0) for the open map, or -1. */
+ * (>= 0) for the open map, or -1.  fsgl_stream_adjust_access() applies the
+ * glcompat.ini access knobs ("safe", "invalidate_range"). */
 GLbitfield fsgl_stream_adjust_access(GLbitfield access);
 void fsgl_stream_trace(char kind, GLuint buf, long long off, long long len,
                       long long arg);
@@ -524,6 +589,9 @@ typedef void (GL_APIENTRY *PFN_glCopyImageSubData)(GLuint, GLenum, GLint, GLint,
                                                    GLsizei, GLsizei, GLsizei);
 typedef void (GL_APIENTRY *PFN_glTexBuffer)(GLenum, GLenum, GLuint);
 typedef void (GL_APIENTRY *PFN_glGenerateMipmap)(GLenum target);
+typedef void (GL_APIENTRY *PFN_glWaitSync)(GLsync, GLbitfield, GLuint64);
+typedef void (GL_APIENTRY *PFN_glFinish)(void);
+typedef void (GL_APIENTRY *PFN_glFlush)(void);
 
 #ifdef __cplusplus
 }

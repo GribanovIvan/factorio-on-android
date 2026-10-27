@@ -106,7 +106,7 @@ void fsgl_log(int prio, const char *fmt, ...)
     va_end(ap);
 }
 
-void fsgl_log_once(const char *key, const char *fmt, ...)
+void fsgl_log_once_impl(const char *key, const char *fmt, ...)
 {
     static const char *seen[256];
     static int nseen = 0;
@@ -256,6 +256,13 @@ static const char *const k_real_names[FSGL_R_COUNT] = {
     [FSGL_R_glGetQueryObjecti64vEXT] = "glGetQueryObjecti64vEXT",
     [FSGL_R_glGetQueryObjectui64vEXT] = "glGetQueryObjectui64vEXT",
     [FSGL_R_glGetQueryObjectivEXT] = "glGetQueryObjectivEXT",
+
+    [FSGL_R_glGenerateMipmap] = "glGenerateMipmap",
+    [FSGL_R_glGenTextures] = "glGenTextures",
+
+    [FSGL_R_glWaitSync] = "glWaitSync",
+    [FSGL_R_glFinish] = "glFinish",
+    [FSGL_R_glFlush] = "glFlush",
 };
 
 FSGLProc fsgl_real_slow(FsglRealId id)
@@ -313,8 +320,8 @@ static void ext_add_synthetic(const char *name, const char *probe_a, const char 
 {
     if (fsgl_have(probe_a) || (probe_b && fsgl_have(probe_b))) {
         ext_add(name);
-        fsgl_log_once(name, "extension: advertising synthetic %s (backed by %s%s%s)",
-                      name, probe_a, probe_b ? "/" : "", probe_b ? probe_b : "");
+        fsgl_log_once_impl(name, "extension: advertising synthetic %s (backed by %s%s%s)",
+                           name, probe_a, probe_b ? "/" : "", probe_b ? probe_b : "");
     }
 }
 
@@ -595,23 +602,27 @@ FsglTexLevel *fsgl_tex_level(FsglTexRec *rec, GLint level)
 
 #define BUF_TARGETS 12
 
-static const GLenum k_buf_targets[BUF_TARGETS] = {
-    GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER, GL_PIXEL_PACK_BUFFER,
-    GL_PIXEL_UNPACK_BUFFER, GL_UNIFORM_BUFFER, GL_COPY_READ_BUFFER,
-    GL_COPY_WRITE_BUFFER, GL_TRANSFORM_FEEDBACK_BUFFER, GL_SHADER_STORAGE_BUFFER,
-    GL_DRAW_INDIRECT_BUFFER, GL_DISPATCH_INDIRECT_BUFFER, GL_ATOMIC_COUNTER_BUFFER
-};
-
 static GLuint g_buf_bound[BUF_TARGETS];
 
+/* Hit on every bind/map/draw; a switch compiles to a compare tree instead of
+ * a 12-entry linear scan. */
 static int buf_target_slot(GLenum target)
 {
-    for (int i = 0; i < BUF_TARGETS; i++) {
-        if (k_buf_targets[i] == target) {
-            return i;
-        }
+    switch (target) {
+    case GL_ARRAY_BUFFER: return 0;
+    case GL_ELEMENT_ARRAY_BUFFER: return 1;
+    case GL_PIXEL_PACK_BUFFER: return 2;
+    case GL_PIXEL_UNPACK_BUFFER: return 3;
+    case GL_UNIFORM_BUFFER: return 4;
+    case GL_COPY_READ_BUFFER: return 5;
+    case GL_COPY_WRITE_BUFFER: return 6;
+    case GL_TRANSFORM_FEEDBACK_BUFFER: return 7;
+    case GL_SHADER_STORAGE_BUFFER: return 8;
+    case GL_DRAW_INDIRECT_BUFFER: return 9;
+    case GL_DISPATCH_INDIRECT_BUFFER: return 10;
+    case GL_ATOMIC_COUNTER_BUFFER: return 11;
+    default: return -1;
     }
-    return -1;
 }
 
 GLuint fsgl_buf_bound(GLenum target)

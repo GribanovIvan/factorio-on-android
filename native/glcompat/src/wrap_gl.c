@@ -90,15 +90,13 @@ static const GLubyte *GL_APIENTRY wrap_glGetString(GLenum name)
     }
     switch (name) {
     case GL_VERSION: {
-        static char s[128];
-        snprintf(s, sizeof(s), "3.3.0 GLCompat (OpenGL ES 3.2)");
+        static const char s[] = "3.3.0 GLCompat (OpenGL ES 3.2)";
         fsgl_log_once("string-version", "string: GL_VERSION -> \"%s\"", s);
         FSGL_PROF_END(0, 0);
         return (const GLubyte *)s;
     }
     case GL_SHADING_LANGUAGE_VERSION: {
-        static char s[128];
-        snprintf(s, sizeof(s), "3.30 GLCompat (GLSL ES 3.20)");
+        static const char s[] = "3.30 GLCompat (GLSL ES 3.20)";
         fsgl_log_once("string-glsl", "string: GL_SHADING_LANGUAGE_VERSION -> \"%s\"", s);
         FSGL_PROF_END(0, 0);
         return (const GLubyte *)s;
@@ -659,15 +657,8 @@ static void *GL_APIENTRY wrap_glMapBufferRange(GLenum target, GLintptr offset,
         fsgl_log_once("maprange-nobind",
                       "maprange: no buffer bound to target 0x%04x", (unsigned)target);
     }
+    /* "safe" and "invalidate_range" knobs; see stream.c. */
     access = fsgl_stream_adjust_access(access);
-    /* The game writes the mapped range without reading its previous bytes.
-     * This is legal with WRITE and lets Adreno select a fresh backing range
-     * instead of preserving old contents, without the full-buffer stall
-     * caused by removing UNSYNCHRONIZED. */
-    if ((access & GL_MAP_WRITE_BIT) &&
-        (access & GL_MAP_UNSYNCHRONIZED_BIT)) {
-        access |= GL_MAP_INVALIDATE_RANGE_BIT;
-    }
     int slot = fsgl_stream_begin_map(target, buf, offset, length, access);
     void *p = real(target, offset, length, access);
     fsgl_stream_mapped(slot, p);
@@ -821,6 +812,22 @@ static void GL_APIENTRY wrap_glQueryCounter(GLuint id, GLenum target)
     FSGL_PROF_END(0, 0);
 }
 
+/* Non-blocking availability probe, only on the EXT_disjoint_timer_query path
+ * (without it no timestamp was ever issued and the emulation below never
+ * blocks).  An invalid id raises the same error the real result query would,
+ * so no error bracketing is needed. */
+static bool query_result_ready(GLuint id)
+{
+    PFN_glGetQueryObjectivEXT iv =
+        (PFN_glGetQueryObjectivEXT)fsgl_real_id(FSGL_R_glGetQueryObjectivEXT);
+    if (!iv || !fsgl_real_id(FSGL_R_glQueryCounterEXT)) {
+        return true;
+    }
+    GLint v = 1;
+    iv(id, GL_QUERY_RESULT_AVAILABLE, &v);
+    return v != 0;
+}
+
 static void GL_APIENTRY wrap_glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params)
 {
     FSGL_PROF_BEGIN(glGetQueryObjecti64v);
@@ -828,6 +835,18 @@ static void GL_APIENTRY wrap_glGetQueryObjecti64v(GLuint id, GLenum pname, GLint
                    (uintptr_t)params, 0);
 
     if (!params) {
+        FSGL_PROF_END(0, 0);
+        return;
+    }
+    if (pname == GL_QUERY_RESULT && !query_result_ready(id)) {
+        /* GL_QUERY_RESULT blocks until the GPU has executed the query.  On a
+         * tiler that means flushing the open render pass and waiting for the
+         * whole frame: CPU and GPU stop overlapping.  The value only feeds
+         * timing statistics, so answer "no time" instead of draining. */
+        fsgl_log_once("timer-not-ready",
+                      "timer: GL_QUERY_RESULT for query %u not available yet; "
+                      "returning 0 instead of stalling the pipeline", id);
+        *params = 0;
         FSGL_PROF_END(0, 0);
         return;
     }
@@ -1356,6 +1375,94 @@ static void GL_APIENTRY wrap_glTexParameteriv(GLenum target, GLenum pname, const
 }
 
 /* ------------------------------------------------------------------ */
+/* Stall probes (FSGL_DIAG only)                                       */
+/* ------------------------------------------------------------------ */
+
+#if FSGL_DIAG
+/* Timing-only pass-throughs for the calls where a CPU<->GPU sync usually
+ * hides.  Before these existed the profile could not see such a stall at
+ * all: the game called the driver directly. */
+static GLenum GL_APIENTRY wrap_glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
+{
+    FSGL_PROF_BEGIN(glClientWaitSync);
+    fsgl_ring_push("glClientWaitSync", (uintptr_t)sync, (uintptr_t)flags,
+                   (uintptr_t)timeout, 0);
+    PFN_glClientWaitSync real = (PFN_glClientWaitSync)fsgl_real_id(FSGL_R_glClientWaitSync);
+    GLenum r = real ? real(sync, flags, timeout) : GL_WAIT_FAILED;
+    FSGL_PROF_END(0, 0);
+    fsgl_err_check("glClientWaitSync", "flags=0x%x timeout=%llu",
+                   (unsigned)flags, (unsigned long long)timeout);
+    return r;
+}
+
+static void GL_APIENTRY wrap_glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
+{
+    FSGL_PROF_BEGIN(glWaitSync);
+    fsgl_ring_push("glWaitSync", (uintptr_t)sync, (uintptr_t)flags, 0, 0);
+    PFN_glWaitSync real = (PFN_glWaitSync)fsgl_real_id(FSGL_R_glWaitSync);
+    if (real) {
+        real(sync, flags, timeout);
+    }
+    FSGL_PROF_END(0, 0);
+    fsgl_err_check("glWaitSync", "flags=0x%x", (unsigned)flags);
+}
+
+static void GL_APIENTRY wrap_glFinish(void)
+{
+    FSGL_PROF_BEGIN(glFinish);
+    fsgl_ring_push("glFinish", 0, 0, 0, 0);
+    PFN_glFinish real = (PFN_glFinish)fsgl_real_id(FSGL_R_glFinish);
+    if (real) {
+        real();
+    }
+    FSGL_PROF_END(0, 0);
+    fsgl_err_check("glFinish", "");
+}
+
+static void GL_APIENTRY wrap_glFlush(void)
+{
+    FSGL_PROF_BEGIN(glFlush);
+    fsgl_ring_push("glFlush", 0, 0, 0, 0);
+    PFN_glFlush real = (PFN_glFlush)fsgl_real_id(FSGL_R_glFlush);
+    if (real) {
+        real();
+    }
+    FSGL_PROF_END(0, 0);
+    fsgl_err_check("glFlush", "");
+}
+
+static void GL_APIENTRY wrap_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                                          GLenum format, GLenum type, void *pixels)
+{
+    FSGL_PROF_BEGIN(glReadPixels);
+    fsgl_ring_push("glReadPixels", (uintptr_t)width, (uintptr_t)height,
+                   (uintptr_t)format, (uintptr_t)type);
+    PFN_glReadPixels real = (PFN_glReadPixels)fsgl_real_id(FSGL_R_glReadPixels);
+    if (real) {
+        real(x, y, width, height, format, type, pixels);
+    }
+    FSGL_PROF_END(0, width > 0 && height > 0 ? (uint64_t)width * (uint64_t)height * 4u : 0);
+    fsgl_err_check("glReadPixels", "x=%d y=%d w=%d h=%d fmt=0x%x type=0x%x",
+                   (int)x, (int)y, (int)width, (int)height, (unsigned)format, (unsigned)type);
+}
+
+static void GL_APIENTRY wrap_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
+                                             const void *data)
+{
+    FSGL_PROF_BEGIN(glBufferSubData);
+    fsgl_ring_push("glBufferSubData", (uintptr_t)target, (uintptr_t)offset,
+                   (uintptr_t)size, 0);
+    PFN_glBufferSubData real = (PFN_glBufferSubData)fsgl_real_id(FSGL_R_glBufferSubData);
+    if (real) {
+        real(target, offset, size, data);
+    }
+    FSGL_PROF_END(size > 0 ? (uint64_t)size : 0, 0);
+    fsgl_err_check("glBufferSubData", "target=0x%x offset=%lld size=%lld",
+                   (unsigned)target, (long long)offset, (long long)size);
+}
+#endif
+
+/* ------------------------------------------------------------------ */
 /* glGetError                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -1384,65 +1491,87 @@ void GL_APIENTRY fsgl_wrap_glGenerateMipmap(GLenum);
 /* Lookup table                                                        */
 /* ------------------------------------------------------------------ */
 
+/* How a lookup is served.
+ *   E_WRAP  always the wrapper: it translates or keeps state the layer needs.
+ *   E_DIAG  the wrapper only does bookkeeping/timing.  Release builds return
+ *           NULL so SDL resolves the driver's own entry point (zero
+ *           overhead); when the driver lacks it the wrapper is still
+ *           returned, because it degrades to a logged no-op instead of a
+ *           NULL call.  The stall probes exist only in FSGL_DIAG builds. */
+enum { E_WRAP, E_DIAG };
+
 typedef struct {
     const char *name;
     FSGLProc fn;
+    int kind;
 } Entry;
 
 static const Entry k_entries[] = {
-    { "glGetString", (FSGLProc)wrap_glGetString },
-    { "glGetStringi", (FSGLProc)wrap_glGetStringi },
-    { "glGetIntegerv", (FSGLProc)wrap_glGetIntegerv },
-    { "glGetError", (FSGLProc)wrap_glGetError },
-    { "glShaderSource", (FSGLProc)wrap_glShaderSource },
-    { "glCompileShader", (FSGLProc)wrap_glCompileShader },
-    { "glDeleteShader", (FSGLProc)wrap_glDeleteShader },
-    { "glBindTexture", (FSGLProc)wrap_glBindTexture },
-    { "glDeleteTextures", (FSGLProc)wrap_glDeleteTextures },
-    { "glBindBuffer", (FSGLProc)wrap_glBindBuffer },
-    { "glBufferData", (FSGLProc)wrap_glBufferData },
-    { "glDeleteBuffers", (FSGLProc)wrap_glDeleteBuffers },
-    { "glMapBuffer", (FSGLProc)wrap_glMapBuffer },
-    { "glMapBufferRange", (FSGLProc)wrap_glMapBufferRange },
-    { "glUnmapBuffer", (FSGLProc)wrap_glUnmapBuffer },
-    { "glFlushMappedBufferRange", (FSGLProc)wrap_glFlushMappedBufferRange },
-    { "glBindVertexArray", (FSGLProc)wrap_glBindVertexArray },
-    { "glVertexAttribPointer", (FSGLProc)wrap_glVertexAttribPointer },
-    { "glEnableVertexAttribArray", (FSGLProc)wrap_glEnableVertexAttribArray },
-    { "glDisableVertexAttribArray", (FSGLProc)wrap_glDisableVertexAttribArray },
-    { "glDrawArrays", (FSGLProc)wrap_glDrawArrays },
-    { "glDrawElements", (FSGLProc)wrap_glDrawElements },
-    { "glQueryCounter", (FSGLProc)wrap_glQueryCounter },
-    { "glGetQueryObjecti64v", (FSGLProc)wrap_glGetQueryObjecti64v },
-    { "glDrawArraysInstancedBaseInstance", (FSGLProc)wrap_glDrawArraysInstancedBaseInstance },
-    { "glUseProgram", (FSGLProc)wrap_glUseProgram },
-    { "glDeleteProgram", (FSGLProc)wrap_glDeleteProgram },
-    { "glDebugMessageCallback", (FSGLProc)wrap_glDebugMessageCallback },
-    { "glDebugMessageControl", (FSGLProc)wrap_glDebugMessageControl },
-    { "glColorMaski", (FSGLProc)wrap_glColorMaski },
-    { "glCopyImageSubData", (FSGLProc)wrap_glCopyImageSubData },
-    { "glTexBuffer", (FSGLProc)wrap_glTexBuffer },
+    { "glGetString", (FSGLProc)wrap_glGetString, E_WRAP },
+    { "glGetStringi", (FSGLProc)wrap_glGetStringi, E_WRAP },
+    { "glGetIntegerv", (FSGLProc)wrap_glGetIntegerv, E_WRAP },
+    { "glGetError", (FSGLProc)wrap_glGetError, E_WRAP },
+    { "glShaderSource", (FSGLProc)wrap_glShaderSource, E_WRAP },
+    { "glCompileShader", (FSGLProc)wrap_glCompileShader, E_WRAP },
+    { "glDeleteShader", (FSGLProc)wrap_glDeleteShader, E_WRAP },
+    { "glBindTexture", (FSGLProc)wrap_glBindTexture, E_WRAP },
+    { "glDeleteTextures", (FSGLProc)wrap_glDeleteTextures, E_WRAP },
+    { "glBindBuffer", (FSGLProc)wrap_glBindBuffer, E_WRAP },
+    { "glBufferData", (FSGLProc)wrap_glBufferData, E_WRAP },
+    { "glDeleteBuffers", (FSGLProc)wrap_glDeleteBuffers, E_WRAP },
+    { "glMapBuffer", (FSGLProc)wrap_glMapBuffer, E_WRAP },
+    { "glMapBufferRange", (FSGLProc)wrap_glMapBufferRange, E_WRAP },
+    { "glUnmapBuffer", (FSGLProc)wrap_glUnmapBuffer, E_WRAP },
+    { "glFlushMappedBufferRange", (FSGLProc)wrap_glFlushMappedBufferRange, E_WRAP },
+    /* Keeps the per-VAO element-buffer binding the map/unmap path relies on. */
+    { "glBindVertexArray", (FSGLProc)wrap_glBindVertexArray, E_WRAP },
+    /* Attribute tracking only feeds the stream report: early unmap finishes
+     * every open write map at a draw and never consults it. */
+    { "glVertexAttribPointer", (FSGLProc)wrap_glVertexAttribPointer, E_DIAG },
+    { "glEnableVertexAttribArray", (FSGLProc)wrap_glEnableVertexAttribArray, E_DIAG },
+    { "glDisableVertexAttribArray", (FSGLProc)wrap_glDisableVertexAttribArray, E_DIAG },
+    { "glDrawArrays", (FSGLProc)wrap_glDrawArrays, E_WRAP },
+    { "glDrawElements", (FSGLProc)wrap_glDrawElements, E_WRAP },
+    { "glQueryCounter", (FSGLProc)wrap_glQueryCounter, E_WRAP },
+    { "glGetQueryObjecti64v", (FSGLProc)wrap_glGetQueryObjecti64v, E_WRAP },
+    { "glDrawArraysInstancedBaseInstance", (FSGLProc)wrap_glDrawArraysInstancedBaseInstance, E_WRAP },
+    { "glUseProgram", (FSGLProc)wrap_glUseProgram, E_WRAP },
+    { "glDeleteProgram", (FSGLProc)wrap_glDeleteProgram, E_WRAP },
+    { "glDebugMessageCallback", (FSGLProc)wrap_glDebugMessageCallback, E_WRAP },
+    { "glDebugMessageControl", (FSGLProc)wrap_glDebugMessageControl, E_WRAP },
+    /* Plain forwards when the driver has them. */
+    { "glColorMaski", (FSGLProc)wrap_glColorMaski, E_DIAG },
+    { "glCopyImageSubData", (FSGLProc)wrap_glCopyImageSubData, E_DIAG },
+    { "glTexBuffer", (FSGLProc)wrap_glTexBuffer, E_DIAG },
+#if FSGL_DIAG
+    { "glClientWaitSync", (FSGLProc)wrap_glClientWaitSync, E_DIAG },
+    { "glWaitSync", (FSGLProc)wrap_glWaitSync, E_DIAG },
+    { "glFinish", (FSGLProc)wrap_glFinish, E_DIAG },
+    { "glFlush", (FSGLProc)wrap_glFlush, E_DIAG },
+    { "glReadPixels", (FSGLProc)wrap_glReadPixels, E_DIAG },
+    { "glBufferSubData", (FSGLProc)wrap_glBufferSubData, E_DIAG },
+#endif
 
-    { "glSamplerParameteri", (FSGLProc)wrap_glSamplerParameteri },
-    { "glSamplerParameterf", (FSGLProc)wrap_glSamplerParameterf },
-    { "glSamplerParameterfv", (FSGLProc)wrap_glSamplerParameterfv },
-    { "glSamplerParameteriv", (FSGLProc)wrap_glSamplerParameteriv },
-    { "glTexParameteri", (FSGLProc)wrap_glTexParameteri },
-    { "glTexParameterf", (FSGLProc)wrap_glTexParameterf },
-    { "glTexParameterfv", (FSGLProc)wrap_glTexParameterfv },
-    { "glTexParameteriv", (FSGLProc)wrap_glTexParameteriv },
+    { "glSamplerParameteri", (FSGLProc)wrap_glSamplerParameteri, E_WRAP },
+    { "glSamplerParameterf", (FSGLProc)wrap_glSamplerParameterf, E_WRAP },
+    { "glSamplerParameterfv", (FSGLProc)wrap_glSamplerParameterfv, E_WRAP },
+    { "glSamplerParameteriv", (FSGLProc)wrap_glSamplerParameteriv, E_WRAP },
+    { "glTexParameteri", (FSGLProc)wrap_glTexParameteri, E_WRAP },
+    { "glTexParameterf", (FSGLProc)wrap_glTexParameterf, E_WRAP },
+    { "glTexParameterfv", (FSGLProc)wrap_glTexParameterfv, E_WRAP },
+    { "glTexParameteriv", (FSGLProc)wrap_glTexParameteriv, E_WRAP },
 
-    { "glTexImage2D", (FSGLProc)fsgl_wrap_glTexImage2D },
-    { "glTexSubImage2D", (FSGLProc)fsgl_wrap_glTexSubImage2D },
-    { "glTexImage3D", (FSGLProc)fsgl_wrap_glTexImage3D },
-    { "glTexSubImage3D", (FSGLProc)fsgl_wrap_glTexSubImage3D },
-    { "glCompressedTexImage2D", (FSGLProc)fsgl_wrap_glCompressedTexImage2D },
-    { "glCompressedTexSubImage2D", (FSGLProc)fsgl_wrap_glCompressedTexSubImage2D },
-    { "glCompressedTexSubImage3D", (FSGLProc)fsgl_wrap_glCompressedTexSubImage3D },
-    { "glGetTexImage", (FSGLProc)fsgl_wrap_glGetTexImage },
-    { "glGetCompressedTexImage", (FSGLProc)fsgl_wrap_glGetCompressedTexImage },
-    { "glGetTexLevelParameteriv", (FSGLProc)fsgl_wrap_glGetTexLevelParameteriv },
-    { "glGenerateMipmap", (FSGLProc)fsgl_wrap_glGenerateMipmap },
+    { "glTexImage2D", (FSGLProc)fsgl_wrap_glTexImage2D, E_WRAP },
+    { "glTexSubImage2D", (FSGLProc)fsgl_wrap_glTexSubImage2D, E_WRAP },
+    { "glTexImage3D", (FSGLProc)fsgl_wrap_glTexImage3D, E_WRAP },
+    { "glTexSubImage3D", (FSGLProc)fsgl_wrap_glTexSubImage3D, E_WRAP },
+    { "glCompressedTexImage2D", (FSGLProc)fsgl_wrap_glCompressedTexImage2D, E_WRAP },
+    { "glCompressedTexSubImage2D", (FSGLProc)fsgl_wrap_glCompressedTexSubImage2D, E_WRAP },
+    { "glCompressedTexSubImage3D", (FSGLProc)fsgl_wrap_glCompressedTexSubImage3D, E_WRAP },
+    { "glGetTexImage", (FSGLProc)fsgl_wrap_glGetTexImage, E_WRAP },
+    { "glGetCompressedTexImage", (FSGLProc)fsgl_wrap_glGetCompressedTexImage, E_WRAP },
+    { "glGetTexLevelParameteriv", (FSGLProc)fsgl_wrap_glGetTexLevelParameteriv, E_WRAP },
+    { "glGenerateMipmap", (FSGLProc)fsgl_wrap_glGenerateMipmap, E_WRAP },
 };
 
 __attribute__((visibility("default")))
@@ -1464,6 +1593,13 @@ void *fsgl_lookup(const char *name)
     }
     for (size_t i = 0; i < sizeof(k_entries) / sizeof(k_entries[0]); i++) {
         if (strcmp(name, k_entries[i].name) == 0) {
+#if !FSGL_DIAG
+            /* NULL hands the name back to SDL's EGL resolution, exactly as
+             * for any entry point this layer does not wrap. */
+            if (k_entries[i].kind == E_DIAG && fsgl_have(name)) {
+                return NULL;
+            }
+#endif
             fsgl_log_once("lookup-first", "lookup: fsgl_lookup('%s') -> wrapper", name);
             return (void *)k_entries[i].fn;
         }

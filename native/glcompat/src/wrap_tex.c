@@ -536,11 +536,13 @@ static unsigned char *decode_compressed(GLenum fmt, GLsizei w, GLsizei h, const 
 }
 
 
-/* One-shot probe: compares the layer's tracked binding with the driver's
+/* Diagnostic probe: compares the layer's tracked binding with the driver's
  * actual binding on the active unit (texture-unit desync would route
- * uploads/updates to the wrong object). */
+ * uploads/updates to the wrong object).  Two glGetIntegerv per streamed tile,
+ * so FSGL_DIAG builds only. */
 static void probe_binding_mismatch(const char *where, GLenum target)
 {
+#if FSGL_DIAG
     PFN_glGetIntegerv gi = get_int();
     if (!gi) {
         return;
@@ -562,6 +564,10 @@ static void probe_binding_mismatch(const char *where, GLenum target)
         last_unit = active_unit;
         fsgl_log(ANDROID_LOG_INFO, "active texture unit now 0x%x", active_unit);
     }
+#else
+    (void)where;
+    (void)target;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -1084,8 +1090,10 @@ void GL_APIENTRY fsgl_wrap_glCompressedTexSubImage2D(GLenum target, GLint level,
                 real(target, level, xoffset, yoffset, width, height,
                      (GLenum)dest_fmt, (GLsizei)dest_sz, dest);
                 /* One-shot diagnostic: on failure, log the call plus the
-                 * driver's view of the level (internal format + extents). */
-                PFN_glGetError geterr = (PFN_glGetError)fsgl_real_id(FSGL_R_glGetError);
+                 * driver's view of the level (internal format + extents).
+                 * Release builds leave the error to fsgl_err_end_extra(). */
+                PFN_glGetError geterr = FSGL_DIAG
+                    ? (PFN_glGetError)fsgl_real_id(FSGL_R_glGetError) : NULL;
                 GLenum e = geterr ? geterr() : 0;
                 if (e != 0) {
                     static const char *last_key;
@@ -1148,7 +1156,8 @@ void GL_APIENTRY fsgl_wrap_glCompressedTexSubImage2D(GLenum target, GLint level,
             probe_binding_mismatch("ctexsub-rgba", target);
             sub(target, level, xoffset, yoffset, width, height, GL_RGBA,
                 GL_UNSIGNED_BYTE, rgba);
-            PFN_glGetError geterr_d = (PFN_glGetError)fsgl_real_id(FSGL_R_glGetError);
+            PFN_glGetError geterr_d = FSGL_DIAG
+                ? (PFN_glGetError)fsgl_real_id(FSGL_R_glGetError) : NULL;
             GLenum e_d = geterr_d ? geterr_d() : 0;
             if (e_d != 0) {
                 static const char *dk;
