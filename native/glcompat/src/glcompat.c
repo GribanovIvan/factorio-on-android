@@ -362,7 +362,22 @@ static void ext_build(void)
         }
     }
 
+    /* What the driver itself can decode; the upload path transcodes the
+     * rest.  Resolved before synthetic entries join the list. */
+    g_ext_caps.s3tc = ext_list_contains("GL_EXT_texture_compression_s3tc") ||
+                      ext_list_contains("GL_ARB_texture_compression_s3tc");
+    g_ext_caps.rgtc = ext_list_contains("GL_EXT_texture_compression_rgtc") ||
+                      ext_list_contains("GL_ARB_texture_compression_rgtc");
+
     /* Only advertise synthetic desktop extensions we can actually back. */
+    if (fsgl_config_fake_s3tc()) {
+        /* Without S3TC the game uploads its colour atlases as RGBA8
+         * ("not-compressed"); advertised, it compresses them to DXT and the
+         * upload path transcodes to ETC2 (4-8 bpp instead of 32). */
+        ext_add("GL_EXT_texture_compression_s3tc");
+        ext_add("GL_ARB_texture_compression_rgtc");
+        fsgl_log_once("fake-s3tc", "extension: advertising S3TC/RGTC backed by the ETC2 transcoder");
+    }
     ext_add_synthetic("GL_ARB_copy_image", "glCopyImageSubData", NULL);
     ext_add_synthetic("GL_ARB_clear_texture", "glClearTexImage", "glClearTexSubImage");
     ext_add_synthetic("GL_KHR_debug", "glDebugMessageCallback", "glDebugMessageCallbackKHR");
@@ -400,10 +415,6 @@ static void ext_build(void)
         }
     }
     g_ext_ready = true;
-    g_ext_caps.s3tc = ext_list_contains("GL_EXT_texture_compression_s3tc") ||
-                      ext_list_contains("GL_ARB_texture_compression_s3tc");
-    g_ext_caps.rgtc = ext_list_contains("GL_EXT_texture_compression_rgtc") ||
-                      ext_list_contains("GL_ARB_texture_compression_rgtc");
     fsgl_log(ANDROID_LOG_INFO, "extensions: %u entries (real+synthetic), %zu bytes",
              g_ext_count, g_ext_joined ? strlen(g_ext_joined) : (size_t)0);
 }

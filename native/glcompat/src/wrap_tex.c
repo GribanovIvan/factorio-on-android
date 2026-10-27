@@ -316,26 +316,15 @@ static bool is_rgtc(GLenum fmt)
     return fmt == GL_COMPRESSED_RED_RGTC1 || fmt == GL_COMPRESSED_RG_RGTC2;
 }
 
-/* Extension-list probing is O(extensions) with strcmp; cache the two answers
- * that compressed uploads need.  Factorio is single-GL-threaded. */
-static int g_s3tc = -1;
-static int g_rgtc = -1;
-
+/* Whether the DRIVER decodes the format.  The advertised list may carry a
+ * synthetic S3TC/RGTC entry (fake_s3tc), so it must not be asked here. */
 static bool driver_supports_compressed(GLenum fmt)
 {
     if (is_dxt(fmt)) {
-        if (g_s3tc < 0) {
-            g_s3tc = (fsgl_has_ext("GL_EXT_texture_compression_s3tc") ||
-                      fsgl_has_ext("GL_ARB_texture_compression_s3tc")) ? 1 : 0;
-        }
-        return g_s3tc != 0;
+        return fsgl_ext_caps()->s3tc;
     }
     if (is_rgtc(fmt)) {
-        if (g_rgtc < 0) {
-            g_rgtc = (fsgl_has_ext("GL_EXT_texture_compression_rgtc") ||
-                      fsgl_has_ext("GL_ARB_texture_compression_rgtc")) ? 1 : 0;
-        }
-        return g_rgtc != 0;
+        return fsgl_ext_caps()->rgtc;
     }
     return true;
 }

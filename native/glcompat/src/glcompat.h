@@ -361,7 +361,8 @@ const char *fsgl_ext_string(void);
 bool fsgl_has_ext(const char *name);
 
 /* Extension predicates that the upload path needs, resolved once while the
- * extension list is built.  No per-upload strcmp walk. */
+ * extension list is built from the DRIVER's extensions (before any synthetic
+ * entry is added).  No per-upload strcmp walk. */
 typedef struct {
     bool s3tc;
     bool rgtc;
@@ -466,6 +467,11 @@ void fsgl_stream_note_draw(const char *kind, GLuint ebo, GLsizei count,
                            const void *indices);
 
 void fsgl_stream_report(void);
+
+/* glcompat.ini "fake_s3tc": advertise GL_EXT_texture_compression_s3tc and
+ * _rgtc although the driver lacks them; uploads are transcoded (wrap_tex.c).
+ * Loads the config on first use. */
+bool fsgl_config_fake_s3tc(void);
 
 /* Pixel-store shadow state.  GL defaults are queried once, then kept in sync
  * by the glPixelStorei wrapper and by the layer's own tight/restore calls. */
