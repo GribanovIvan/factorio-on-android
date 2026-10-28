@@ -282,6 +282,17 @@ typedef void (GL_APIENTRY *PFN_glDrawRangeElements)(GLenum, GLuint, GLuint, GLsi
 
 void GL_APIENTRY fsgl_ft_glBindFramebuffer(GLenum target, GLuint fbo)
 {
+    static int inval = -1;
+    if (inval < 0) {
+        inval = fsgl_config_invalidate_ds() ? 1 : 0;
+    }
+    if (inval && T.draw_fbo != 0 && fbo != T.draw_fbo &&
+        (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)) {
+        static const GLenum ds[] = { GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
+        fsgl_err_begin_extra("invalidate-ds");
+        REAL(PFN_glInvalidateFramebuffer, glInvalidateFramebuffer)(GL_DRAW_FRAMEBUFFER, 2, ds);
+        fsgl_err_end_extra("invalidate-ds");
+    }
     REAL(PFN_glBindFramebuffer, glBindFramebuffer)(target, fbo);
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER) {
         return;

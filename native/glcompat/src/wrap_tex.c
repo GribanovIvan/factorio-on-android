@@ -696,6 +696,27 @@ void GL_APIENTRY fsgl_wrap_glTexImage2D(GLenum target, GLint level, GLint intern
      * game allocates its compressed atlases (shadows, alpha masks, and every
      * colour atlas once S3TC is advertised) exactly this way, with no data,
      * then fills them with glCompressedTexSubImage2D. */
+#if FSGL_DIAG
+    if (!pixels && level == 0) {
+        /* Render targets are allocated without data; their formats decide
+         * the per-pass bandwidth on a tiler. */
+        static struct { GLint ifmt; GLsizei w, h; } seen[64];
+        static int nseen;
+        bool known = false;
+        for (int i = 0; i < nseen; i++) {
+            known |= seen[i].ifmt == internalformat && seen[i].w == width && seen[i].h == height;
+        }
+        if (!known && nseen < 64) {
+            seen[nseen].ifmt = internalformat;
+            seen[nseen].w = width;
+            seen[nseen].h = height;
+            nseen++;
+            fsgl_log(ANDROID_LOG_INFO, "alloc: texture %u ifmt=0x%x fmt=0x%x type=0x%x %dx%d",
+                     fsgl_tex_bound(target), (unsigned)internalformat, (unsigned)format,
+                     (unsigned)type, (int)width, (int)height);
+        }
+    }
+#endif
     bool decode_later = false;
     if ((is_dxt((GLenum)internalformat) || is_rgtc((GLenum)internalformat)) &&
         !driver_supports_compressed((GLenum)internalformat)) {

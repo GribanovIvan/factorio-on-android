@@ -494,6 +494,11 @@ const char *fsgl_shader_source(GLuint shader, GLenum *stage);
  * Loads the config on first use. */
 bool fsgl_config_fake_s3tc(void);
 
+/* glcompat.ini "invalidate_ds": invalidate depth/stencil of the draw
+ * framebuffer whenever the game switches to another one, so a tiler neither
+ * stores them at the end of the pass nor reloads them when it resumes. */
+bool fsgl_config_invalidate_ds(void);
+
 /* Pixel-store shadow state.  GL defaults are queried once, then kept in sync
  * by the glPixelStorei wrapper and by the layer's own tight/restore calls. */
 typedef struct {

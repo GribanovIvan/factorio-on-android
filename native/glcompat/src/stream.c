@@ -160,6 +160,7 @@ static struct {
     int inval_range;   /* add INVALIDATE_RANGE to WRITE|UNSYNCHRONIZED maps */
     int verbose;
     int fake_s3tc;     /* advertise S3TC/RGTC backed by the ETC2 transcoder */
+    int invalidate_ds; /* drop depth/stencil when leaving a framebuffer */
 
     OpenMap maps[MAX_OPEN];
     int nmaps;
@@ -212,6 +213,8 @@ static void config_apply(const char *key, const char *val)
         S.verbose = v;
     } else if (!strcmp(key, "fake_s3tc")) {
         S.fake_s3tc = v;
+    } else if (!strcmp(key, "invalidate_ds")) {
+        S.invalidate_ds = v;
     }
 }
 
@@ -283,8 +286,9 @@ static void stream_init(void)
     stream_read_config();
     fsgl_log(ANDROID_LOG_INFO,
              "stream: trace=%d fence=%d early_unmap=%d safe=%d invalidate_range=%d verbose=%d "
-             "fake_s3tc=%d",
-             S.trace, S.fence, S.early_unmap, S.safe, S.inval_range, S.verbose, S.fake_s3tc);
+             "fake_s3tc=%d invalidate_ds=%d",
+             S.trace, S.fence, S.early_unmap, S.safe, S.inval_range, S.verbose, S.fake_s3tc,
+             S.invalidate_ds);
     if (S.trace) {
         /* The periodic report runs on the profiler's dump thread. */
         fsgl_prof_start();
@@ -526,6 +530,12 @@ static void fence_wait_region(GLuint buf, GLintptr off, GLsizeiptr len)
 /* ------------------------------------------------------------------ */
 /* Map / flush / unmap                                                 */
 /* ------------------------------------------------------------------ */
+
+bool fsgl_config_invalidate_ds(void)
+{
+    stream_init();
+    return S.invalidate_ds != 0;
+}
 
 bool fsgl_config_fake_s3tc(void)
 {
